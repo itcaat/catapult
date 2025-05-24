@@ -101,7 +101,8 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 			conflicted++
 		}
 		if result.Error != nil {
-			fmt.Fprintf(out, "Error syncing %s: %v\n", result.Path, result.Error)
+			// Enhanced error handling with user-friendly messages
+			s.handleSyncError(out, result.Path, result.Error)
 		}
 	}
 
@@ -234,4 +235,65 @@ func (s *Syncer) resolveConflict(ctx context.Context, file *storage.FileInfo, re
 	}
 
 	return nil
+}
+
+// handleSyncError provides enhanced error handling with user-friendly messages
+func (s *Syncer) handleSyncError(out io.Writer, path string, err error) {
+	// Check for custom repository errors that provide user-friendly messages
+	switch e := err.(type) {
+	case *repository.FileSizeError:
+		fmt.Fprintf(out, "❌ %s\n", e.Error())
+		fmt.Fprintf(out, "💡 Solutions:\n")
+		fmt.Fprintf(out, "   • Use Git LFS: git lfs track \"*.mov\" (for video files)\n")
+		fmt.Fprintf(out, "   • Split file: split -b 50m %s %s_part_\n", filepath.Base(e.FilePath), filepath.Base(e.FilePath))
+		fmt.Fprintf(out, "   • Exclude from sync: Add pattern to .gitignore\n")
+		fmt.Fprintf(out, "   • Use external storage: Upload to cloud storage instead\n\n")
+
+	case *repository.GitHubPermissionError:
+		fmt.Fprintf(out, "❌ %s\n", e.Error())
+		fmt.Fprintf(out, "💡 Solutions:\n")
+		fmt.Fprintf(out, "   • Check repository permissions in GitHub settings\n")
+		fmt.Fprintf(out, "   • Verify your GitHub token has 'repo' scope\n")
+		fmt.Fprintf(out, "   • Try re-authenticating: catapult init\n\n")
+
+	case *repository.GitHubValidationError:
+		fmt.Fprintf(out, "❌ %s\n", e.Error())
+		fmt.Fprintf(out, "💡 Solutions:\n")
+		fmt.Fprintf(out, "   • Check file name and content for invalid characters\n")
+		fmt.Fprintf(out, "   • Ensure file is not binary or corrupted\n")
+		fmt.Fprintf(out, "   • Try excluding this file type from sync\n\n")
+
+	case *repository.GitHubRepositoryError:
+		fmt.Fprintf(out, "❌ %s\n", e.Error())
+		fmt.Fprintf(out, "💡 Solutions:\n")
+		fmt.Fprintf(out, "   • Check repository exists and is accessible\n")
+		fmt.Fprintf(out, "   • Verify repository name in config\n")
+		fmt.Fprintf(out, "   • Try re-initializing: catapult init\n\n")
+
+	case *repository.GitHubAPIError:
+		fmt.Fprintf(out, "❌ %s\n", e.Error())
+		fmt.Fprintf(out, "💡 Solutions:\n")
+		if e.StatusCode == 403 {
+			fmt.Fprintf(out, "   • You may have hit GitHub API rate limits\n")
+			fmt.Fprintf(out, "   • Wait a few minutes and try again\n")
+		} else if e.StatusCode >= 500 {
+			fmt.Fprintf(out, "   • GitHub servers may be experiencing issues\n")
+			fmt.Fprintf(out, "   • Check https://status.github.com for service status\n")
+		} else {
+			fmt.Fprintf(out, "   • Check GitHub service status\n")
+			fmt.Fprintf(out, "   • Verify your internet connection\n")
+		}
+		fmt.Fprintf(out, "   • Try again later or contact support if issue persists\n\n")
+
+	default:
+		// Fallback for unknown errors
+		fmt.Fprintf(out, "❌ Error syncing %s: %v\n", path, err)
+
+		// Provide general troubleshooting advice
+		fmt.Fprintf(out, "💡 General troubleshooting:\n")
+		fmt.Fprintf(out, "   • Check your internet connection\n")
+		fmt.Fprintf(out, "   • Verify file permissions and accessibility\n")
+		fmt.Fprintf(out, "   • Try running: catapult status\n")
+		fmt.Fprintf(out, "   • Check logs with: catapult service logs (if using service)\n\n")
+	}
 }

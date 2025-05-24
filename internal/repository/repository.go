@@ -9,6 +9,66 @@ import (
 	"github.com/google/go-github/v57/github"
 )
 
+// Custom error types for better user experience
+
+// FileSizeError represents file size limit errors
+type FileSizeError struct {
+	FilePath string
+	FileSize int
+	Limit    int
+}
+
+func (e *FileSizeError) Error() string {
+	sizeMB := float64(e.FileSize) / (1024 * 1024)
+	limitMB := float64(e.Limit) / (1024 * 1024)
+	return fmt.Sprintf("File '%s' (%.1f MB) exceeds GitHub's %d MB limit. "+
+		"Consider using Git LFS, splitting the file, or excluding it from sync",
+		e.FilePath, sizeMB, int(limitMB))
+}
+
+// GitHubValidationError represents validation errors from GitHub API
+type GitHubValidationError struct {
+	FilePath string
+	Message  string
+	Details  string
+}
+
+func (e *GitHubValidationError) Error() string {
+	return fmt.Sprintf("GitHub validation error for '%s': %s", e.FilePath, e.Message)
+}
+
+// GitHubPermissionError represents permission errors
+type GitHubPermissionError struct {
+	FilePath string
+	Message  string
+	Details  string
+}
+
+func (e *GitHubPermissionError) Error() string {
+	return fmt.Sprintf("Permission denied for '%s': %s. Check repository access rights", e.FilePath, e.Message)
+}
+
+// GitHubRepositoryError represents repository access errors
+type GitHubRepositoryError struct {
+	Message string
+	Details string
+}
+
+func (e *GitHubRepositoryError) Error() string {
+	return fmt.Sprintf("Repository error: %s", e.Message)
+}
+
+// GitHubAPIError represents general GitHub API errors
+type GitHubAPIError struct {
+	StatusCode int
+	Message    string
+	FilePath   string
+}
+
+func (e *GitHubAPIError) Error() string {
+	return fmt.Sprintf("GitHub API error (HTTP %d) for '%s': %s", e.StatusCode, e.FilePath, e.Message)
+}
+
 // RemoteFileInfo contains information about a remote file
 type RemoteFileInfo struct {
 	Path    string
@@ -94,12 +154,65 @@ func (r *GitHubRepository) GetDefaultBranch(ctx context.Context) (string, error)
 
 // CreateFile creates a file in the repository
 func (r *GitHubRepository) CreateFile(ctx context.Context, path, content string) error {
+	// Check file size before attempting upload
+	fileSize := len(content)
+	const githubFileSizeLimit = 100 * 1024 * 1024 // 100MB in bytes
+
+	if fileSize > githubFileSizeLimit {
+		return &FileSizeError{
+			FilePath: path,
+			FileSize: fileSize,
+			Limit:    githubFileSizeLimit,
+		}
+	}
+
 	_, _, err := r.client.Repositories.CreateFile(ctx, r.owner, r.name, path, &github.RepositoryContentFileOptions{
 		Message: github.String(fmt.Sprintf("Add %s", path)),
 		Content: []byte(content),
 		Branch:  github.String("main"),
 	})
 	if err != nil {
+		// Check for GitHub API specific errors
+		if ghErr, ok := err.(*github.ErrorResponse); ok {
+			switch ghErr.Response.StatusCode {
+			case 413: // Payload Too Large
+				return &FileSizeError{
+					FilePath: path,
+					FileSize: fileSize,
+					Limit:    githubFileSizeLimit,
+				}
+			case 422: // Unprocessable Entity (could be file too large or other validation error)
+				if fileSize > githubFileSizeLimit {
+					return &FileSizeError{
+						FilePath: path,
+						FileSize: fileSize,
+						Limit:    githubFileSizeLimit,
+					}
+				}
+				return &GitHubValidationError{
+					FilePath: path,
+					Message:  "File validation failed",
+					Details:  ghErr.Message,
+				}
+			case 403: // Forbidden
+				return &GitHubPermissionError{
+					FilePath: path,
+					Message:  "Permission denied",
+					Details:  ghErr.Message,
+				}
+			case 404: // Not Found
+				return &GitHubRepositoryError{
+					Message: "Repository not found or inaccessible",
+					Details: ghErr.Message,
+				}
+			default:
+				return &GitHubAPIError{
+					StatusCode: ghErr.Response.StatusCode,
+					Message:    ghErr.Message,
+					FilePath:   path,
+				}
+			}
+		}
 		return fmt.Errorf("failed to create file: %w", err)
 	}
 	return nil

@@ -81,7 +81,16 @@ func PrintStatus(fileManager *storage.FileManager, repo repository.Repository, b
 		if localExists && !remoteExists {
 			fmt.Fprintf(w, "  Size: %d bytes\n", file.Size)
 			fmt.Fprintf(w, "  Last Modified: %s\n", file.LastModified.Format("2006-01-02 15:04:05"))
-			fmt.Fprintf(w, "  Status: Local-only (needs to be uploaded)\n\n")
+
+			// Check for large files and warn user
+			const githubFileSizeLimit = 100 * 1024 * 1024 // 100MB
+			if file.Size > githubFileSizeLimit {
+				sizeMB := float64(file.Size) / (1024 * 1024)
+				fmt.Fprintf(w, "  ⚠️  Status: Local-only - TOO LARGE (%.1f MB > 100 MB) - WILL NOT SYNC\n", sizeMB)
+			} else {
+				fmt.Fprintf(w, "  Status: Local-only (needs to be uploaded)\n")
+			}
+			fmt.Fprintf(w, "\n")
 			continue
 		}
 
