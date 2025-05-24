@@ -9,7 +9,7 @@ before:
 
 builds:
   - id: catapult
-    dir: ./cmd/catapult
+    dir: cmd/catapult
     binary: catapult
     
     # Build for multiple platforms
