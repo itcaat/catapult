@@ -204,6 +204,7 @@ func (r *Repository) Initialize() error {
 - [x] Conflict detection and resolution
 - [x] Download remote-only files
 - [x] Tests updated and fixed for new sync logic
+- [x] Fixed status command to properly detect remote changes
 
 ## Executor's Feedback or Assistance Requests
 *Detailed user feedback for sync/pull is implemented:*

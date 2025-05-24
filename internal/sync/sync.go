@@ -52,10 +52,10 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 	// Get local files
 	localFiles := s.fileManager.GetTrackedFiles()
 
-	// Get remote files
-	remoteFiles, err := s.repo.ListFiles(ctx)
+	// Get all remote files with content efficiently
+	remoteFiles, err := s.repo.GetAllFilesWithContent(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to list remote files: %w", err)
+		return fmt.Errorf("failed to get remote files with content: %w", err)
 	}
 
 	// Create a map of all files (local + remote)
@@ -71,7 +71,7 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 	}
 
 	// Add remote files that don't exist locally
-	for _, remotePath := range remoteFiles {
+	for remotePath := range remoteFiles {
 		if _, exists := allFiles[remotePath]; !exists {
 			// Create a virtual FileInfo for remote-only file
 			localPath := filepath.Join(s.fileManager.BaseDir(), remotePath)
@@ -89,7 +89,7 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 
 	// Sync each file
 	for relPath, file := range allFiles {
-		result := s.syncFileByPath(ctx, file, relPath)
+		result := s.syncFileByPath(ctx, file, relPath, remoteFiles[relPath])
 		switch result.Status {
 		case SyncStatusSynced:
 			synced++
@@ -116,14 +116,11 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 }
 
 // syncFileByPath synchronizes a single file using relative path
-func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, relPath string) SyncResult {
+func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, relPath string, remoteFile *repository.RemoteFileInfo) SyncResult {
 	// Check if file exists in remote
-	exists, err := s.repo.FileExists(ctx, relPath)
-	if err != nil {
-		return SyncResult{Path: file.Path, Error: err}
-	}
+	remoteExists := remoteFile != nil
 
-	if !exists {
+	if !remoteExists {
 		// File doesn't exist in remote, create it if it exists locally
 		if _, err := os.Stat(file.Path); os.IsNotExist(err) {
 			// Neither local nor remote exists - this shouldn't happen
@@ -139,22 +136,17 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 			return SyncResult{Path: file.Path, Error: err}
 		}
 
-		// Update sync info
-		if err := s.fileManager.UpdateSyncInfo(file.Path, ""); err != nil {
+		// Update sync info with the new SHA
+		localGitSHA := s.fileManager.CalculateGitSHAFromContent(content)
+		if err := s.fileManager.UpdateSyncInfo(file.Path, localGitSHA); err != nil {
 			return SyncResult{Path: file.Path, Error: err}
 		}
 
 		return SyncResult{Path: file.Path, Status: SyncStatusLocalChanges}
 	}
 
-	// Get remote file content
-	remoteContent, err := s.repo.GetFile(ctx, relPath)
-	if err != nil {
-		return SyncResult{Path: file.Path, Error: err}
-	}
-
 	// Check if local file exists
-	_, err = os.Stat(file.Path)
+	_, err := os.Stat(file.Path)
 	if os.IsNotExist(err) {
 		// Local file doesn't exist, download remote file
 		// Create directory if it doesn't exist
@@ -162,7 +154,7 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 			return SyncResult{Path: file.Path, Error: err}
 		}
 
-		if err := os.WriteFile(file.Path, []byte(remoteContent), 0644); err != nil {
+		if err := os.WriteFile(file.Path, []byte(remoteFile.Content), 0644); err != nil {
 			return SyncResult{Path: file.Path, Error: err}
 		}
 
@@ -171,8 +163,8 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 			return SyncResult{Path: file.Path, Error: err}
 		}
 
-		// Update sync info
-		if err := s.fileManager.UpdateSyncInfo(file.Path, ""); err != nil {
+		// Update sync info with the remote SHA
+		if err := s.fileManager.UpdateSyncInfo(file.Path, remoteFile.SHA); err != nil {
 			return SyncResult{Path: file.Path, Error: err}
 		}
 
@@ -186,9 +178,9 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 	}
 
 	// Compare content
-	if string(localContent) == remoteContent {
+	if string(localContent) == remoteFile.Content {
 		// Content is the same, update sync info
-		if err := s.fileManager.UpdateSyncInfo(file.Path, ""); err != nil {
+		if err := s.fileManager.UpdateSyncInfo(file.Path, remoteFile.SHA); err != nil {
 			return SyncResult{Path: file.Path, Error: err}
 		}
 		return SyncResult{Path: file.Path, Status: SyncStatusSynced}
@@ -206,12 +198,12 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 	// If local file hasn't changed since last sync, just pull remote changes
 	if lastSyncedHash == currentLocalHash {
 		// Local file unchanged, remote file changed - pull remote changes
-		if err := os.WriteFile(file.Path, []byte(remoteContent), 0644); err != nil {
+		if err := os.WriteFile(file.Path, []byte(remoteFile.Content), 0644); err != nil {
 			return SyncResult{Path: file.Path, Error: err}
 		}
 
 		// Update sync info
-		if err := s.fileManager.UpdateSyncInfo(file.Path, ""); err != nil {
+		if err := s.fileManager.UpdateSyncInfo(file.Path, remoteFile.SHA); err != nil {
 			return SyncResult{Path: file.Path, Error: err}
 		}
 
@@ -219,7 +211,7 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 	}
 
 	// Both local and remote have changes - this is a conflict
-	if err := s.resolveConflict(ctx, file, relPath, localContent, []byte(remoteContent)); err != nil {
+	if err := s.resolveConflict(ctx, file, relPath, localContent, []byte(remoteFile.Content)); err != nil {
 		return SyncResult{Path: file.Path, Status: SyncStatusConflict, Error: err}
 	}
 
@@ -233,8 +225,11 @@ func (s *Syncer) resolveConflict(ctx context.Context, file *storage.FileInfo, re
 		return err
 	}
 
-	// Update sync info
-	if err := s.fileManager.UpdateSyncInfo(file.Path, ""); err != nil {
+	// Calculate local Git SHA to save as remote SHA (since we uploaded local content)
+	localGitSHA := s.fileManager.CalculateGitSHAFromContent(localContent)
+
+	// Update sync info with the new SHA
+	if err := s.fileManager.UpdateSyncInfo(file.Path, localGitSHA); err != nil {
 		return err
 	}
 

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/itcaat/catapult/internal/repository"
 	"github.com/itcaat/catapult/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -54,6 +55,11 @@ func (m *MockRepository) FileExists(ctx context.Context, path string) (bool, err
 func (m *MockRepository) ListFiles(ctx context.Context) ([]string, error) {
 	args := m.Called(ctx)
 	return args.Get(0).([]string), args.Error(1)
+}
+
+func (m *MockRepository) GetAllFilesWithContent(ctx context.Context) (map[string]*repository.RemoteFileInfo, error) {
+	args := m.Called(ctx)
+	return args.Get(0).(map[string]*repository.RemoteFileInfo), args.Error(1)
 }
 
 func TestSyncAll(t *testing.T) {

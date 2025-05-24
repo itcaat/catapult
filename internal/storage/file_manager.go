@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -248,6 +249,34 @@ func (fm *FileManager) LoadState(path string) error {
 // CalculateFileHash calculates the SHA-256 hash of a file (public method)
 func (fm *FileManager) CalculateFileHash(path string) (string, error) {
 	return fm.calculateFileHash(path)
+}
+
+// CalculateGitSHA calculates the Git SHA-1 hash of a file (like GitHub uses)
+func (fm *FileManager) CalculateGitSHA(path string) (string, error) {
+	// Read file content
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %w", err)
+	}
+
+	return fm.calculateGitSHAFromContent(content), nil
+}
+
+// CalculateGitSHAFromContent calculates Git SHA-1 from content
+func (fm *FileManager) CalculateGitSHAFromContent(content []byte) string {
+	return fm.calculateGitSHAFromContent(content)
+}
+
+// calculateGitSHAFromContent calculates Git blob SHA-1 hash from content
+func (fm *FileManager) calculateGitSHAFromContent(content []byte) string {
+	// Git calculates SHA-1 of "blob <size>\0<content>"
+	header := fmt.Sprintf("blob %d\x00", len(content))
+
+	hash := sha1.New()
+	hash.Write([]byte(header))
+	hash.Write(content)
+
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 // calculateFileHash calculates the SHA-256 hash of a file

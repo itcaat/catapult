@@ -9,6 +9,14 @@ import (
 	"github.com/google/go-github/v57/github"
 )
 
+// RemoteFileInfo contains information about a remote file
+type RemoteFileInfo struct {
+	Path    string
+	Content string
+	SHA     string
+	Size    int
+}
+
 // Repository defines the interface for repository operations
 type Repository interface {
 	EnsureExists(ctx context.Context) error
@@ -19,6 +27,7 @@ type Repository interface {
 	DeleteFile(ctx context.Context, path string) error
 	FileExists(ctx context.Context, path string) (bool, error)
 	ListFiles(ctx context.Context) ([]string, error)
+	GetAllFilesWithContent(ctx context.Context) (map[string]*RemoteFileInfo, error)
 }
 
 // GitHubRepository implements the Repository interface using GitHub API
@@ -204,6 +213,75 @@ func (r *GitHubRepository) listFilesRecursive(ctx context.Context, path string, 
 				subPath = filepath.Join(path, content.GetName())
 			}
 			err := r.listFilesRecursive(ctx, subPath, files)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// GetAllFilesWithContent gets all files with their content efficiently
+func (r *GitHubRepository) GetAllFilesWithContent(ctx context.Context) (map[string]*RemoteFileInfo, error) {
+	files := make(map[string]*RemoteFileInfo)
+
+	// Get repository contents recursively with content
+	err := r.getAllFilesRecursive(ctx, "", files)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all files with content: %w", err)
+	}
+
+	return files, nil
+}
+
+// getAllFilesRecursive recursively lists files in a directory and retrieves their content
+func (r *GitHubRepository) getAllFilesRecursive(ctx context.Context, path string, files map[string]*RemoteFileInfo) error {
+	_, directoryContent, _, err := r.client.Repositories.GetContents(ctx, r.owner, r.name, path, &github.RepositoryContentGetOptions{
+		Ref: "main",
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, content := range directoryContent {
+		if content.GetType() == "file" {
+			filePath := content.GetName()
+			if path != "" {
+				filePath = filepath.Join(path, content.GetName())
+			}
+
+			// Get content if available, otherwise make a separate call
+			fileContent := ""
+			if content.Content != nil {
+				// Content is available in the API response (for small files)
+				decodedContent, err := content.GetContent()
+				if err == nil {
+					fileContent = decodedContent
+				}
+			}
+
+			// If content wasn't available in the listing, we'll get it separately
+			if fileContent == "" {
+				decodedContent, err := r.GetFile(ctx, filePath)
+				if err == nil {
+					fileContent = decodedContent
+				}
+			}
+
+			files[filePath] = &RemoteFileInfo{
+				Path:    filePath,
+				Content: fileContent,
+				SHA:     content.GetSHA(),
+				Size:    content.GetSize(),
+			}
+		} else if content.GetType() == "dir" {
+			// Recursively get files from subdirectory
+			subPath := content.GetName()
+			if path != "" {
+				subPath = filepath.Join(path, content.GetName())
+			}
+			err := r.getAllFilesRecursive(ctx, subPath, files)
 			if err != nil {
 				return err
 			}
