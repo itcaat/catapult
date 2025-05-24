@@ -103,27 +103,30 @@ release:
 
 # Universal Binaries for macOS
 universal_binaries:
-  - replace: true
+  - replace: true 
 
-# Homebrew tap (optional)
+# Homebrew tap
 brews:
-  - name: catapult
-    
-    # GitHub repository for Homebrew tap
-    repository:
+  - repository:
       owner: itcaat
       name: homebrew-tap
       branch: main
     
-    # Homebrew configuration
+    # Formula details
+    name: catapult
     homepage: "https://github.com/itcaat/catapult"
-    description: "A console application for file management and synchronization with GitHub"
+    description: "A console application for file management and synchronization with GitHub using device flow authentication"
     license: "MIT"
     
-    # Install configuration
+    # Installation
     install: |
       bin.install "catapult"
     
-    # Test configuration
+    # Test the installation
     test: |
-      system "#{bin}/catapult", "--help" 
+      system "#{bin}/catapult", "version"
+    
+    # Dependencies (if any)
+    # dependencies:
+    #   - name: git
+    #     type: optional 
