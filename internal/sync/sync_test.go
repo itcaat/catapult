@@ -89,12 +89,8 @@ func TestSyncAll(t *testing.T) {
 		mockRepo.ExpectedCalls = nil
 		mockRepo.Calls = nil
 
-		// Mock ListFiles to return empty list (no remote files)
-		mockRepo.On("ListFiles", mock.Anything).Return([]string{}, nil).Once()
-
-		// Mock FileExists to return false for both files
-		mockRepo.On("FileExists", mock.Anything, "test1.txt").Return(false, nil).Once()
-		mockRepo.On("FileExists", mock.Anything, "test2.txt").Return(false, nil).Once()
+		// Mock GetAllFilesWithContent to return empty map (no remote files)
+		mockRepo.On("GetAllFilesWithContent", mock.Anything).Return(map[string]*repository.RemoteFileInfo{}, nil).Once()
 
 		// Mock CreateFile for both files
 		mockRepo.On("CreateFile", mock.Anything, "test1.txt", "test content 1").Return(nil).Once()
@@ -110,18 +106,32 @@ func TestSyncAll(t *testing.T) {
 		mockRepo.ExpectedCalls = nil
 		mockRepo.Calls = nil
 
-		// Mock ListFiles to return remote-only files
-		mockRepo.On("ListFiles", mock.Anything).Return([]string{"test1.txt", "test2.txt", "remote.txt"}, nil).Once()
+		// Calculate Git SHA for local content to match remote
+		localGitSHA1 := fileManager.CalculateGitSHAFromContent([]byte("test content 1"))
+		localGitSHA2 := fileManager.CalculateGitSHAFromContent([]byte("test content 2"))
 
-		// Mock for existing local files
-		mockRepo.On("FileExists", mock.Anything, "test1.txt").Return(true, nil).Once()
-		mockRepo.On("FileExists", mock.Anything, "test2.txt").Return(true, nil).Once()
-		mockRepo.On("GetFile", mock.Anything, "test1.txt").Return("test content 1", nil).Once()
-		mockRepo.On("GetFile", mock.Anything, "test2.txt").Return("test content 2", nil).Once()
-
-		// Mock for remote-only file
-		mockRepo.On("FileExists", mock.Anything, "remote.txt").Return(true, nil).Once()
-		mockRepo.On("GetFile", mock.Anything, "remote.txt").Return("remote file content", nil).Once()
+		// Mock GetAllFilesWithContent to return remote files
+		remoteFiles := map[string]*repository.RemoteFileInfo{
+			"test1.txt": {
+				Path:    "test1.txt",
+				Content: "test content 1",
+				SHA:     localGitSHA1, // Same as local
+				Size:    len("test content 1"),
+			},
+			"test2.txt": {
+				Path:    "test2.txt",
+				Content: "test content 2",
+				SHA:     localGitSHA2, // Same as local
+				Size:    len("test content 2"),
+			},
+			"remote.txt": {
+				Path:    "remote.txt",
+				Content: "remote file content",
+				SHA:     "sha3",
+				Size:    len("remote file content"),
+			},
+		}
+		mockRepo.On("GetAllFilesWithContent", mock.Anything).Return(remoteFiles, nil).Once()
 
 		// Run sync
 		err := syncer.SyncAll(context.Background(), os.Stdout)
@@ -158,14 +168,11 @@ func TestSyncAll(t *testing.T) {
 		mockRepo.ExpectedCalls = nil
 		mockRepo.Calls = nil
 
-		// Mock ListFiles to return empty list
-		mockRepo.On("ListFiles", mock.Anything).Return([]string{}, nil).Once()
+		// Mock GetAllFilesWithContent to return empty map
+		mockRepo.On("GetAllFilesWithContent", mock.Anything).Return(map[string]*repository.RemoteFileInfo{}, nil).Once()
 
-		// Mock FileExists to return error for first file
-		mockRepo.On("FileExists", mock.Anything, "error1.txt").Return(false, assert.AnError).Once()
-		mockRepo.On("FileExists", mock.Anything, "error2.txt").Return(false, nil).Once()
-
-		// Mock CreateFile for second file
+		// Mock CreateFile calls - one will succeed, one will fail
+		mockRepo.On("CreateFile", mock.Anything, "error1.txt", "error content 1").Return(assert.AnError).Once()
 		mockRepo.On("CreateFile", mock.Anything, "error2.txt", "error content 2").Return(nil).Once()
 
 		// Run sync
@@ -203,9 +210,6 @@ func TestSyncFileByPath(t *testing.T) {
 		mockRepo.ExpectedCalls = nil
 		mockRepo.Calls = nil
 
-		// Mock FileExists to return false
-		mockRepo.On("FileExists", mock.Anything, "test.txt").Return(false, nil).Once()
-
 		// Mock CreateFile
 		mockRepo.On("CreateFile", mock.Anything, "test.txt", "test content").Return(nil).Once()
 
@@ -213,7 +217,7 @@ func TestSyncFileByPath(t *testing.T) {
 		result := syncer.syncFileByPath(context.Background(), &storage.FileInfo{
 			Path: testFile,
 			Hash: "testhash",
-		}, "test.txt")
+		}, "test.txt", nil) // nil means file doesn't exist in remote
 		assert.NoError(t, result.Error)
 		assert.Equal(t, SyncStatusLocalChanges, result.Status)
 		mockRepo.AssertExpectations(t)
@@ -226,17 +230,19 @@ func TestSyncFileByPath(t *testing.T) {
 		// Create a path for non-existent local file
 		remoteOnlyFile := filepath.Join(tempDir, "remote_only.txt")
 
-		// Mock FileExists to return true (exists in remote)
-		mockRepo.On("FileExists", mock.Anything, "remote_only.txt").Return(true, nil).Once()
-
-		// Mock GetFile to return remote content
-		mockRepo.On("GetFile", mock.Anything, "remote_only.txt").Return("remote content", nil).Once()
+		// Create RemoteFileInfo for remote file
+		remoteFileInfo := &repository.RemoteFileInfo{
+			Path:    "remote_only.txt",
+			Content: "remote content",
+			SHA:     "remotesha123",
+			Size:    len("remote content"),
+		}
 
 		// Run sync
 		result := syncer.syncFileByPath(context.Background(), &storage.FileInfo{
 			Path: remoteOnlyFile,
 			Hash: "",
-		}, "remote_only.txt")
+		}, "remote_only.txt", remoteFileInfo)
 		assert.NoError(t, result.Error)
 		assert.Equal(t, SyncStatusRemoteChanges, result.Status)
 		mockRepo.AssertExpectations(t)
@@ -251,36 +257,43 @@ func TestSyncFileByPath(t *testing.T) {
 		mockRepo.ExpectedCalls = nil
 		mockRepo.Calls = nil
 
-		// Mock FileExists to return true
-		mockRepo.On("FileExists", mock.Anything, "test.txt").Return(true, nil).Once()
+		// Calculate Git SHA for test content
+		localGitSHA := fileManager.CalculateGitSHAFromContent([]byte("test content"))
 
-		// Mock GetFile to return same content
-		mockRepo.On("GetFile", mock.Anything, "test.txt").Return("test content", nil).Once()
+		// Create RemoteFileInfo with same content
+		remoteFileInfo := &repository.RemoteFileInfo{
+			Path:    "test.txt",
+			Content: "test content",
+			SHA:     localGitSHA, // Same SHA as local
+			Size:    len("test content"),
+		}
 
 		// Run sync
 		result := syncer.syncFileByPath(context.Background(), &storage.FileInfo{
 			Path: testFile,
 			Hash: "testhash",
-		}, "test.txt")
+		}, "test.txt", remoteFileInfo)
 		assert.NoError(t, result.Error)
 		assert.Equal(t, SyncStatusSynced, result.Status)
 		mockRepo.AssertExpectations(t)
 	})
 
-	t.Run("FileExistsError", func(t *testing.T) {
+	t.Run("FileReadError", func(t *testing.T) {
 		mockRepo.ExpectedCalls = nil
 		mockRepo.Calls = nil
 
-		// Mock FileExists to return error
-		mockRepo.On("FileExists", mock.Anything, "test.txt").Return(false, assert.AnError).Once()
+		// Create a file that exists but will cause read error
+		// We'll create a directory with the same name as the file to cause read error
+		errorDir := filepath.Join(tempDir, "error_file")
+		err := os.Mkdir(errorDir, 0755)
+		assert.NoError(t, err)
 
-		// Run sync
+		// Run sync with nil remote file (local only) - this should fail when trying to read the directory as a file
 		result := syncer.syncFileByPath(context.Background(), &storage.FileInfo{
-			Path: testFile,
+			Path: errorDir,
 			Hash: "testhash",
-		}, "test.txt")
+		}, "error_file", nil)
 		assert.Error(t, result.Error)
-		assert.Equal(t, assert.AnError, result.Error)
 		mockRepo.AssertExpectations(t)
 	})
 }

@@ -1,0 +1,129 @@
+# GoReleaser configuration for Catapult
+version: 2
+
+before:
+  hooks:
+    # Clean up before building
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: catapult
+    main: ./cmd/catapult
+    binary: catapult
+    
+    # Build for multiple platforms
+    goos:
+      - linux
+      - windows
+      - darwin
+    
+    goarch:
+      - amd64
+      - arm64
+    
+    # Skip unsupported combinations
+    ignore:
+      - goos: windows
+        goarch: arm64
+    
+    # Build flags
+    flags:
+      - -trimpath
+    
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    
+    env:
+      - CGO_ENABLED=0
+
+archives:
+  - id: catapult
+    
+    # Archive name template
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    
+    # Files to include in archive
+    files:
+      - README.md
+      - LICENSE*
+      - config.yaml
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "merge conflict"
+      - Merge pull request
+      - Merge remote-tracking branch
+      - Merge branch
+
+release:
+  github:
+    owner: itcaat
+    name: catapult
+  
+  # Draft release (manual publish)
+  draft: false
+  
+  # Mark as prerelease if version contains alpha, beta or rc
+  prerelease: auto
+  
+  # Release name template
+  name_template: "Catapult v{{.Version}}"
+  
+  # Release header and footer
+  header: |
+    ## Catapult v{{.Version}}
+    
+    A console application for file management and synchronization with GitHub using device flow authentication.
+    
+    ### Installation
+    
+    Download the appropriate binary for your platform from the assets below.
+    
+  footer: |
+    ### Usage
+    
+    1. Run `catapult init` to set up authentication
+    2. Use `catapult status` to check file synchronization status
+    3. Use `catapult sync` to synchronize files with GitHub
+    
+    For more information, see the [README](https://github.com/itcaat/catapult/blob/main/README.md).
+
+# Universal Binaries for macOS
+universal_binaries:
+  - replace: true
+
+# Homebrew tap (optional)
+brews:
+  - name: catapult
+    
+    # GitHub repository for Homebrew tap
+    repository:
+      owner: itcaat
+      name: homebrew-tap
+      branch: main
+    
+    # Homebrew configuration
+    homepage: "https://github.com/itcaat/catapult"
+    description: "A console application for file management and synchronization with GitHub"
+    license: "MIT"
+    
+    # Install configuration
+    install: |
+      bin.install "catapult"
+    
+    # Test configuration
+    test: |
+      system "#{bin}/catapult", "--help" 
