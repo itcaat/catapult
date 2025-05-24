@@ -1,0 +1,318 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+
+	"github.com/google/go-github/v57/github"
+	"github.com/itcaat/catapult/internal/auth"
+	"github.com/itcaat/catapult/internal/config"
+	"github.com/itcaat/catapult/internal/repository"
+	"github.com/itcaat/catapult/internal/storage"
+	"github.com/itcaat/catapult/internal/sync"
+	"github.com/spf13/cobra"
+)
+
+// Version information (set by GoReleaser)
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
+var rootCmd = &cobra.Command{
+	Use:   "catapult",
+	Short: "Catapult - GitHub file sync application",
+	Long: `Catapult is a console application for file management and synchronization 
+with GitHub using device flow authentication.`,
+}
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Show version information",
+	Long:  `Display version, commit hash, and build date information.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Printf("Catapult %s\n", version)
+		fmt.Printf("Commit: %s\n", commit)
+		fmt.Printf("Built: %s\n", date)
+	},
+}
+
+var initCmd = &cobra.Command{
+	Use:   "init",
+	Short: "Initialize Catapult",
+	Long:  `Initialize Catapult by setting up authentication and repository.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// Load configuration
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+
+		// Create device flow
+		deviceFlow := auth.NewDeviceFlow(&auth.Config{
+			ClientID: cfg.GitHub.ClientID,
+			Scopes:   cfg.GitHub.Scopes,
+		})
+
+		// Initiate authentication
+		token, err := deviceFlow.Initiate()
+		if err != nil {
+			return fmt.Errorf("failed to authenticate: %w", err)
+		}
+
+		// Save token in configuration
+		cfg.GitHub.Token = token.AccessToken
+		if err := cfg.Save(); err != nil {
+			return fmt.Errorf("failed to save token: %w", err)
+		}
+
+		// Create GitHub client
+		fmt.Printf("Using token: %s\n", cfg.GitHub.Token)
+		client := github.NewClient(nil).WithAuthToken(token.AccessToken)
+
+		// Get authenticated user
+		user, _, err := client.Users.Get(context.Background(), "")
+		if err != nil {
+			return fmt.Errorf("failed to get user: %w", err)
+		}
+
+		// Create repository instance
+		repo := repository.New(client, user.GetLogin(), cfg.Repository.Name)
+
+		// Ensure repository exists
+		if err := repo.EnsureExists(context.Background()); err != nil {
+			return fmt.Errorf("failed to ensure repository exists: %w", err)
+		}
+
+		// Create storage directories
+		if err := os.MkdirAll(cfg.Storage.BaseDir, 0755); err != nil {
+			return fmt.Errorf("failed to create base directory: %w", err)
+		}
+
+		// Initialize file manager
+		fileManager := storage.NewFileManager(cfg.Storage.BaseDir)
+
+		// Save initial state
+		if err := fileManager.SaveState(cfg.Storage.StatePath); err != nil {
+			return fmt.Errorf("failed to save initial state: %w", err)
+		}
+
+		fmt.Printf("Successfully initialized Catapult with repository: %s\n", cfg.Repository.Name)
+		return nil
+	},
+}
+
+var syncCmd = &cobra.Command{
+	Use:   "sync",
+	Short: "Sync files with GitHub",
+	Long:  `Sync all files in the current directory with GitHub repository.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// Load configuration
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+
+		// Ensure base directory exists
+		if err := os.MkdirAll(cfg.Storage.BaseDir, 0755); err != nil {
+			return fmt.Errorf("failed to create base directory: %w", err)
+		}
+
+		// Create file manager
+		fileManager := storage.NewFileManager(cfg.Storage.BaseDir)
+
+		// Load state if exists
+		if err := fileManager.LoadState(cfg.Storage.StatePath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to load state: %w", err)
+		}
+
+		// Scan directory for files
+		if err := fileManager.ScanDirectory(); err != nil {
+			return fmt.Errorf("failed to scan directory: %w", err)
+		}
+
+		// Create GitHub client
+		client := github.NewClient(nil).WithAuthToken(cfg.GitHub.Token)
+
+		// Get authenticated user
+		user, _, err := client.Users.Get(context.Background(), "")
+		if err != nil {
+			return fmt.Errorf("failed to get user: %w", err)
+		}
+
+		// Create repository instance
+		repo := repository.New(client, user.GetLogin(), cfg.Repository.Name)
+
+		// Create sync instance
+		syncer := sync.New(repo, fileManager)
+
+		// Sync all files with progress output
+		if err := syncer.SyncAll(context.Background(), os.Stdout); err != nil {
+			return fmt.Errorf("failed to sync files: %w", err)
+		}
+
+		// Save state after sync
+		if err := fileManager.SaveState(cfg.Storage.StatePath); err != nil {
+			return fmt.Errorf("failed to save state: %w", err)
+		}
+
+		return nil
+	},
+}
+
+var statusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show status of tracked files",
+	Long:  `Show status of all files and their synchronization state with GitHub.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+		fileManager := storage.NewFileManager(cfg.Storage.BaseDir)
+		if err := fileManager.LoadState(cfg.Storage.StatePath); err != nil {
+			return fmt.Errorf("failed to load state: %w", err)
+		}
+		client := github.NewClient(nil).WithAuthToken(cfg.GitHub.Token)
+		user, _, err := client.Users.Get(context.Background(), "")
+		if err != nil {
+			return fmt.Errorf("failed to get user: %w", err)
+		}
+		repo := repository.New(client, user.GetLogin(), cfg.Repository.Name)
+		return PrintStatus(fileManager, repo, cfg.Storage.BaseDir, cmd.OutOrStdout())
+	},
+}
+
+// PrintStatus prints the status of tracked files to the provided writer
+func PrintStatus(fileManager *storage.FileManager, repo repository.Repository, baseDir string, w io.Writer) error {
+	// Get local files
+	localFiles := fileManager.GetTrackedFiles()
+
+	// Get all remote files with content in one efficient call
+	remoteFiles, err := repo.GetAllFilesWithContent(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to get remote files with content: %w", err)
+	}
+
+	// Create map of all files (local + remote)
+	allFiles := make(map[string]*storage.FileInfo)
+
+	// Add local files
+	for _, file := range localFiles {
+		relPath, err := filepath.Rel(baseDir, file.Path)
+		if err != nil {
+			return fmt.Errorf("failed to get relative path: %w", err)
+		}
+		allFiles[relPath] = file
+	}
+
+	// Add remote-only files
+	for remotePath := range remoteFiles {
+		if _, exists := allFiles[remotePath]; !exists {
+			// Create virtual FileInfo for remote-only file
+			localPath := filepath.Join(baseDir, remotePath)
+			allFiles[remotePath] = &storage.FileInfo{
+				Path: localPath,
+				Hash: "", // Remote-only file
+			}
+		}
+	}
+
+	if len(allFiles) == 0 {
+		fmt.Fprintln(w, "No files are being tracked")
+		return nil
+	}
+
+	fmt.Fprintf(w, "\nTracked Files Status:\n")
+	fmt.Fprintf(w, "====================\n\n")
+
+	for relPath, file := range allFiles {
+		fmt.Fprintf(w, "File: %s\n", relPath)
+
+		// Check if file exists locally
+		localExists := true
+		if _, err := os.Stat(file.Path); os.IsNotExist(err) {
+			localExists = false
+		}
+
+		// Check if file exists remotely
+		remoteFile, remoteExists := remoteFiles[relPath]
+
+		// Determine real status
+		if !localExists && !remoteExists {
+			fmt.Fprintf(w, "  Status: File not found (this shouldn't happen)\n\n")
+			continue
+		}
+
+		if !localExists && remoteExists {
+			fmt.Fprintf(w, "  Size: %d bytes (remote)\n", remoteFile.Size)
+			fmt.Fprintf(w, "  Status: Remote-only (needs to be downloaded)\n\n")
+			continue
+		}
+
+		if localExists && !remoteExists {
+			fmt.Fprintf(w, "  Size: %d bytes\n", file.Size)
+			fmt.Fprintf(w, "  Last Modified: %s\n", file.LastModified.Format("2006-01-02 15:04:05"))
+			fmt.Fprintf(w, "  Status: Local-only (needs to be uploaded)\n\n")
+			continue
+		}
+
+		// Both exist - compare content
+		localContent, err := os.ReadFile(file.Path)
+		if err != nil {
+			fmt.Fprintf(w, "  Status: Error reading local file: %v\n\n", err)
+			continue
+		}
+
+		fmt.Fprintf(w, "  Size: %d bytes\n", file.Size)
+		fmt.Fprintf(w, "  Last Modified: %s\n", file.LastModified.Format("2006-01-02 15:04:05"))
+
+		// Calculate local Git SHA-1 (like GitHub uses)
+		localGitSHA := fileManager.CalculateGitSHAFromContent(localContent)
+
+		// Compare SHA instead of content for efficiency
+		if localGitSHA == remoteFile.SHA {
+			fmt.Fprintf(w, "  Status: Synced\n")
+		} else {
+			// Check if file was modified locally since last sync
+			lastSyncedHash := file.LastSyncedHash
+			lastSyncedRemoteSHA := file.LastSyncedRemoteSHA
+			currentLocalHash, err := fileManager.CalculateFileHash(file.Path)
+			if err != nil {
+				fmt.Fprintf(w, "  Status: Error calculating file hash: %v\n", err)
+			} else if lastSyncedHash == currentLocalHash {
+				// Local unchanged since last sync, remote changed
+				fmt.Fprintf(w, "  Status: Modified in repository (needs to be pulled)\n")
+			} else if lastSyncedRemoteSHA == remoteFile.SHA {
+				// Remote unchanged since last sync, local changed
+				fmt.Fprintf(w, "  Status: Modified locally (needs to be synced)\n")
+			} else if lastSyncedHash == "" || lastSyncedRemoteSHA == "" {
+				// No sync info - determine based on which side changed
+				fmt.Fprintf(w, "  Status: Modified locally (needs to be synced)\n")
+			} else {
+				// Both changed since last sync - conflict
+				fmt.Fprintf(w, "  Status: Conflict: both local and remote changes exist\n")
+			}
+		}
+		fmt.Fprintln(w)
+	}
+	return nil
+}
+
+func init() {
+	rootCmd.AddCommand(initCmd)
+	rootCmd.AddCommand(syncCmd)
+	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(versionCmd)
+}
+
+func main() {
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}
