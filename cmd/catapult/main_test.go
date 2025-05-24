@@ -9,8 +9,8 @@ import (
 
 	"github.com/itcaat/catapult/internal/config"
 	"github.com/itcaat/catapult/internal/repository"
+	"github.com/itcaat/catapult/internal/status"
 	"github.com/itcaat/catapult/internal/storage"
-	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
@@ -105,8 +105,8 @@ func TestStatusCommand(t *testing.T) {
 
 	// Create test command
 	var buf bytes.Buffer
-	// Проверяем статус через функцию PrintStatus
-	err = PrintStatus(fileManager, mockRepo, tempDir, &buf)
+	// Use the status package PrintStatus function
+	err = status.PrintStatus(fileManager, mockRepo, tempDir, &buf)
 	assert.NoError(t, err)
 
 	// Verify output
@@ -138,19 +138,7 @@ func TestStatusCommandNoFiles(t *testing.T) {
 	cfg.Storage.BaseDir = tempDir
 	cfg.Storage.StatePath = statePath
 
-	// Create test command
-	cmd := statusCmd
-	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		// Get tracked files
-		files := fileManager.GetTrackedFiles()
-		if len(files) == 0 {
-			return nil
-		}
-
-		return nil
-	}
-
-	// Execute command
-	err = cmd.Execute()
-	assert.NoError(t, err)
+	// Get tracked files - should be empty
+	files := fileManager.GetTrackedFiles()
+	assert.Empty(t, files)
 }
