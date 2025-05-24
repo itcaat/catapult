@@ -11,14 +11,22 @@ func TestDebouncer_Add(t *testing.T) {
 	defer debouncer.Stop()
 
 	called := false
+	var mu sync.Mutex
+
 	debouncer.Add("test", func() {
+		mu.Lock()
 		called = true
+		mu.Unlock()
 	})
 
 	// Wait for timer to fire
 	time.Sleep(100 * time.Millisecond)
 
-	if !called {
+	mu.Lock()
+	wasCalled := called
+	mu.Unlock()
+
+	if !wasCalled {
 		t.Error("Expected callback to be called")
 	}
 }
@@ -57,8 +65,12 @@ func TestDebouncer_Cancel(t *testing.T) {
 	defer debouncer.Stop()
 
 	called := false
+	var mu sync.Mutex
+
 	debouncer.Add("test", func() {
+		mu.Lock()
 		called = true
+		mu.Unlock()
 	})
 
 	// Cancel before timer fires
@@ -67,7 +79,11 @@ func TestDebouncer_Cancel(t *testing.T) {
 	// Wait longer than debounce period
 	time.Sleep(100 * time.Millisecond)
 
-	if called {
+	mu.Lock()
+	wasCalled := called
+	mu.Unlock()
+
+	if wasCalled {
 		t.Error("Expected callback to not be called after cancellation")
 	}
 }
@@ -99,8 +115,12 @@ func TestDebouncer_Stop(t *testing.T) {
 	debouncer := NewDebouncer(50 * time.Millisecond)
 
 	called := false
+	var mu sync.Mutex
+
 	debouncer.Add("test", func() {
+		mu.Lock()
 		called = true
+		mu.Unlock()
 	})
 
 	debouncer.Stop()
@@ -108,7 +128,11 @@ func TestDebouncer_Stop(t *testing.T) {
 	// Wait longer than debounce period
 	time.Sleep(100 * time.Millisecond)
 
-	if called {
+	mu.Lock()
+	wasCalled := called
+	mu.Unlock()
+
+	if wasCalled {
 		t.Error("Expected callback to not be called after stop")
 	}
 
