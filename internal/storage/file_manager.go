@@ -21,6 +21,7 @@ type FileInfo struct {
 	Size                int64     `json:"size"`
 	LastSyncedHash      string    `json:"last_synced_hash"`
 	LastSyncedRemoteSHA string    `json:"last_synced_remote_sha"`
+	Deleted             bool      `json:"deleted,omitempty"` // Track if file was deleted locally
 }
 
 // SyncStatus represents the synchronization status of a file
@@ -64,8 +65,10 @@ func (fm *FileManager) ScanDirectory() error {
 		existingFiles[path] = info
 	}
 
-	// Clear existing files
-	fm.files = make(map[string]*FileInfo)
+	// Mark all existing files as potentially deleted
+	for _, info := range fm.files {
+		info.Deleted = true
+	}
 
 	// Walk through the directory
 	err := filepath.Walk(fm.baseDir, func(path string, info os.FileInfo, err error) error {
@@ -98,22 +101,25 @@ func (fm *FileManager) ScanDirectory() error {
 			return fmt.Errorf("failed to calculate file hash: %w", err)
 		}
 
-		// Create file info
-		fileInfo := &FileInfo{
-			Path:         path,
-			Hash:         hash,
-			LastModified: info.ModTime(),
-			Size:         info.Size(),
-		}
-
-		// Preserve sync info if file was already tracked
+		// Check if file was already tracked
 		if existingInfo, exists := existingFiles[path]; exists {
-			fileInfo.LastSyncedHash = existingInfo.LastSyncedHash
-			fileInfo.LastSyncedRemoteSHA = existingInfo.LastSyncedRemoteSHA
+			// Update existing file info
+			existingInfo.Hash = hash
+			existingInfo.LastModified = info.ModTime()
+			existingInfo.Size = info.Size()
+			existingInfo.Deleted = false // File exists, not deleted
+			fm.files[path] = existingInfo
+		} else {
+			// Create new file info
+			fileInfo := &FileInfo{
+				Path:         path,
+				Hash:         hash,
+				LastModified: info.ModTime(),
+				Size:         info.Size(),
+				Deleted:      false,
+			}
+			fm.files[path] = fileInfo
 		}
-
-		// Add to tracking list
-		fm.files[path] = fileInfo
 
 		return nil
 	})
@@ -417,4 +423,9 @@ func copyFile(src, dst string) error {
 	}
 
 	return nil
+}
+
+// RemoveFile removes a file from tracking
+func (fm *FileManager) RemoveFile(path string) {
+	delete(fm.files, path)
 }

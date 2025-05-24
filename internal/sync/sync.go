@@ -19,6 +19,7 @@ const (
 	SyncStatusLocalChanges
 	SyncStatusRemoteChanges
 	SyncStatusConflict
+	SyncStatusDeleted // New status for files that were deleted
 )
 
 // SyncResult represents the result of a file synchronization
@@ -85,20 +86,28 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 	fmt.Fprintf(out, "Syncing %d files...\n", len(allFiles))
 
 	// Track results
-	var synced, updated, pulled, conflicted int
+	var synced, updated, pulled, conflicted, deleted int
 
 	// Sync each file
 	for relPath, file := range allFiles {
 		result := s.syncFileByPath(ctx, file, relPath, remoteFiles[relPath])
+
+		// Show what's happening with each file
 		switch result.Status {
 		case SyncStatusSynced:
 			synced++
 		case SyncStatusLocalChanges:
+			fmt.Fprintf(out, "📤 Uploaded: %s\n", relPath)
 			updated++
 		case SyncStatusRemoteChanges:
+			fmt.Fprintf(out, "📥 Downloaded: %s\n", relPath)
 			pulled++
 		case SyncStatusConflict:
+			fmt.Fprintf(out, "⚠️  Conflict resolved (local version kept): %s\n", relPath)
 			conflicted++
+		case SyncStatusDeleted:
+			fmt.Fprintf(out, "🗑️  Deleted from repository: %s\n", relPath)
+			deleted++
 		}
 		if result.Error != nil {
 			// Enhanced error handling with user-friendly messages
@@ -112,6 +121,7 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 	fmt.Fprintf(out, "Updated: %d\n", updated)
 	fmt.Fprintf(out, "Pulled: %d\n", pulled)
 	fmt.Fprintf(out, "Conflicts: %d\n", conflicted)
+	fmt.Fprintf(out, "Deleted: %d\n", deleted)
 
 	return nil
 }
@@ -146,30 +156,48 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 		return SyncResult{Path: file.Path, Status: SyncStatusLocalChanges}
 	}
 
-	// Check if local file exists
-	_, err := os.Stat(file.Path)
-	if os.IsNotExist(err) {
-		// Local file doesn't exist, download remote file
-		// Create directory if it doesn't exist
-		if err := os.MkdirAll(filepath.Dir(file.Path), 0755); err != nil {
-			return SyncResult{Path: file.Path, Error: err}
-		}
+	// Check if local file exists or is marked as deleted
+	_, statErr := os.Stat(file.Path)
+	localFileDeleted := os.IsNotExist(statErr) || file.Deleted
 
-		if err := os.WriteFile(file.Path, []byte(remoteFile.Content), 0644); err != nil {
-			return SyncResult{Path: file.Path, Error: err}
-		}
+	if localFileDeleted {
+		// Local file doesn't exist or is marked as deleted
+		// If it was previously synced, delete from remote
+		// If it was never synced, download from remote
 
-		// Rescan directory to pick up the newly downloaded file
-		if err := s.fileManager.ScanDirectory(); err != nil {
-			return SyncResult{Path: file.Path, Error: err}
-		}
+		if file.LastSyncedRemoteSHA != "" {
+			// File was previously synced but now deleted locally - delete from remote
+			if err := s.repo.DeleteFile(ctx, relPath); err != nil {
+				return SyncResult{Path: file.Path, Error: fmt.Errorf("failed to delete remote file: %w", err)}
+			}
 
-		// Update sync info with the remote SHA
-		if err := s.fileManager.UpdateSyncInfo(file.Path, remoteFile.SHA); err != nil {
-			return SyncResult{Path: file.Path, Error: err}
-		}
+			// Remove from file manager tracking since it's deleted
+			s.fileManager.RemoveFile(file.Path)
 
-		return SyncResult{Path: file.Path, Status: SyncStatusRemoteChanges}
+			return SyncResult{Path: file.Path, Status: SyncStatusDeleted}
+		} else {
+			// File was never synced locally - download from remote
+			// Create directory if it doesn't exist
+			if err := os.MkdirAll(filepath.Dir(file.Path), 0755); err != nil {
+				return SyncResult{Path: file.Path, Error: err}
+			}
+
+			if err := os.WriteFile(file.Path, []byte(remoteFile.Content), 0644); err != nil {
+				return SyncResult{Path: file.Path, Error: err}
+			}
+
+			// Rescan directory to pick up the newly downloaded file
+			if err := s.fileManager.ScanDirectory(); err != nil {
+				return SyncResult{Path: file.Path, Error: err}
+			}
+
+			// Update sync info with the remote SHA
+			if err := s.fileManager.UpdateSyncInfo(file.Path, remoteFile.SHA); err != nil {
+				return SyncResult{Path: file.Path, Error: err}
+			}
+
+			return SyncResult{Path: file.Path, Status: SyncStatusRemoteChanges}
+		}
 	}
 
 	// Get local file content

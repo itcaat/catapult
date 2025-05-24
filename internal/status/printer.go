@@ -59,7 +59,7 @@ func PrintStatus(fileManager *storage.FileManager, repo repository.Repository, b
 
 		// Check if file exists locally
 		localExists := true
-		if _, err := os.Stat(file.Path); os.IsNotExist(err) {
+		if _, err := os.Stat(file.Path); os.IsNotExist(err) || file.Deleted {
 			localExists = false
 		}
 
@@ -74,7 +74,15 @@ func PrintStatus(fileManager *storage.FileManager, repo repository.Repository, b
 
 		if !localExists && remoteExists {
 			fmt.Fprintf(w, "  Size: %d bytes (remote)\n", remoteFile.Size)
-			fmt.Fprintf(w, "  Status: Remote-only (needs to be downloaded)\n\n")
+
+			// Check if this file was previously synced (has sync info)
+			// If it was synced before, it means it was deleted locally and should be deleted from remote
+			// If it was never synced, it should be downloaded
+			if file.LastSyncedRemoteSHA != "" {
+				fmt.Fprintf(w, "  Status: Deleted locally (will be deleted from repository on sync)\n\n")
+			} else {
+				fmt.Fprintf(w, "  Status: Remote-only (needs to be downloaded)\n\n")
+			}
 			continue
 		}
 
