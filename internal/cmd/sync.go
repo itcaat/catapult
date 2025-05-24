@@ -3,9 +3,11 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 
 	"github.com/google/go-github/v57/github"
+	"github.com/itcaat/catapult/internal/autosync"
 	"github.com/itcaat/catapult/internal/config"
 	"github.com/itcaat/catapult/internal/repository"
 	"github.com/itcaat/catapult/internal/storage"
@@ -15,7 +17,9 @@ import (
 
 // NewSyncCmd creates and returns the sync command
 func NewSyncCmd() *cobra.Command {
-	return &cobra.Command{
+	var watchMode bool
+
+	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Sync files with GitHub",
 		Long:  `Sync all files in the current directory with GitHub repository.`,
@@ -59,7 +63,26 @@ func NewSyncCmd() *cobra.Command {
 			// Create sync instance
 			syncer := sync.New(repo, fileManager)
 
-			// Sync all files with progress output
+			// If watch mode is enabled, start auto-sync
+			if watchMode {
+				fmt.Println("🔄 Starting auto-sync with file watching...")
+				fmt.Println("💡 Files will be automatically synced when changed")
+				fmt.Println("⚡ Press Ctrl+C to stop watching")
+
+				// Create logger for auto-sync
+				logger := log.New(os.Stdout, "[AUTO-SYNC] ", log.LstdFlags)
+
+				// Create auto-sync manager
+				manager, err := autosync.NewManager(cfg, syncer, fileManager, repo, logger)
+				if err != nil {
+					return fmt.Errorf("failed to create auto-sync manager: %w", err)
+				}
+
+				// Start auto-sync (blocks until Ctrl+C)
+				return manager.Start(context.Background())
+			}
+
+			// Sync all files with progress output (one-time sync)
 			if err := syncer.SyncAll(context.Background(), os.Stdout); err != nil {
 				return fmt.Errorf("failed to sync files: %w", err)
 			}
@@ -72,4 +95,9 @@ func NewSyncCmd() *cobra.Command {
 			return nil
 		},
 	}
+
+	// Add --watch flag
+	cmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Watch for file changes and sync automatically")
+
+	return cmd
 }
