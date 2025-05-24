@@ -2,8 +2,6 @@ package sync
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -53,6 +51,87 @@ func (m *MockRepository) FileExists(ctx context.Context, path string) (bool, err
 	return args.Bool(0), args.Error(1)
 }
 
+func TestSyncAll(t *testing.T) {
+	// Create temporary directory
+	tempDir, err := os.MkdirTemp("", "catapult-test-*")
+	assert.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	// Create test files
+	testFile1 := filepath.Join(tempDir, "test1.txt")
+	testFile2 := filepath.Join(tempDir, "test2.txt")
+	err = os.WriteFile(testFile1, []byte("test content 1"), 0644)
+	assert.NoError(t, err)
+	err = os.WriteFile(testFile2, []byte("test content 2"), 0644)
+	assert.NoError(t, err)
+
+	// Create file manager
+	fileManager := storage.NewFileManager(tempDir)
+
+	// Create mock repository
+	mockRepo := new(MockRepository)
+
+	// Create sync instance
+	syncer := New(mockRepo, fileManager)
+
+	t.Run("SyncNewFiles", func(t *testing.T) {
+		mockRepo.ExpectedCalls = nil
+		mockRepo.Calls = nil
+
+		// Mock FileExists to return false for both files
+		mockRepo.On("FileExists", mock.Anything, "test1.txt").Return(false, nil).Once()
+		mockRepo.On("FileExists", mock.Anything, "test2.txt").Return(false, nil).Once()
+
+		// Mock CreateFile for both files
+		mockRepo.On("CreateFile", mock.Anything, "test1.txt", "test content 1").Return(nil).Once()
+		mockRepo.On("CreateFile", mock.Anything, "test2.txt", "test content 2").Return(nil).Once()
+
+		// Run sync
+		err := syncer.SyncAll(context.Background(), os.Stdout)
+		assert.NoError(t, err)
+		mockRepo.AssertExpectations(t)
+	})
+
+	t.Run("SyncExistingFiles", func(t *testing.T) {
+		mockRepo.ExpectedCalls = nil
+		mockRepo.Calls = nil
+
+		// Mock FileExists to return true for both files
+		mockRepo.On("FileExists", mock.Anything, "test1.txt").Return(true, nil).Once()
+		mockRepo.On("FileExists", mock.Anything, "test2.txt").Return(true, nil).Once()
+
+		// Mock GetFile to return different content
+		mockRepo.On("GetFile", mock.Anything, "test1.txt").Return("remote content 1", nil).Once()
+		mockRepo.On("GetFile", mock.Anything, "test2.txt").Return("remote content 2", nil).Once()
+
+		// Mock UpdateFile for both files (using local content)
+		mockRepo.On("UpdateFile", mock.Anything, "test1.txt", "test content 1").Return(nil).Once()
+		mockRepo.On("UpdateFile", mock.Anything, "test2.txt", "test content 2").Return(nil).Once()
+
+		// Run sync
+		err := syncer.SyncAll(context.Background(), os.Stdout)
+		assert.NoError(t, err)
+		mockRepo.AssertExpectations(t)
+	})
+
+	t.Run("SyncWithErrors", func(t *testing.T) {
+		mockRepo.ExpectedCalls = nil
+		mockRepo.Calls = nil
+
+		// Mock FileExists to return error for first file
+		mockRepo.On("FileExists", mock.Anything, "test1.txt").Return(false, assert.AnError).Once()
+		mockRepo.On("FileExists", mock.Anything, "test2.txt").Return(false, nil).Once()
+
+		// Mock CreateFile for second file
+		mockRepo.On("CreateFile", mock.Anything, "test2.txt", "test content 2").Return(nil).Once()
+
+		// Run sync
+		err := syncer.SyncAll(context.Background(), os.Stdout)
+		assert.NoError(t, err) // Sync continues despite errors
+		mockRepo.AssertExpectations(t)
+	})
+}
+
 func TestSyncFile(t *testing.T) {
 	// Create temporary directory
 	tempDir, err := os.MkdirTemp("", "catapult-test-*")
@@ -66,191 +145,94 @@ func TestSyncFile(t *testing.T) {
 
 	// Create file manager
 	fileManager := storage.NewFileManager(tempDir)
-	err = fileManager.AddFile(testFile)
-	assert.NoError(t, err)
 
 	// Create mock repository
 	mockRepo := new(MockRepository)
 
 	// Create sync instance
-	sync := New(mockRepo, fileManager)
+	syncer := New(mockRepo, fileManager)
 
-	// Вспомогательная функция для выставления sync info
-	setSyncInfo := func(path, lastSyncedHash, lastSyncedRemoteSHA string) {
-		fi, _ := fileManager.GetFileInfo(path)
-		fi.LastSyncedHash = lastSyncedHash
-		fi.LastSyncedRemoteSHA = lastSyncedRemoteSHA
-	}
-
-	t.Run("SyncStatusSynced", func(t *testing.T) {
-		mockRepo.ExpectedCalls = nil
-		mockRepo.Calls = nil
-		content, _ := os.ReadFile(testFile)
-		h := sha256.Sum256(content)
-		hash := hex.EncodeToString(h[:])
-		setSyncInfo(testFile, hash, "sha123")
-		status, err := fileManager.GetSyncStatus(testFile)
-		assert.NoError(t, err)
-		t.Logf("Sync status before test: %v", status)
-		assert.Equal(t, storage.SyncStatusSynced, status)
-		err = sync.SyncFile(context.Background(), testFile)
-		assert.NoError(t, err)
-		mockRepo.AssertExpectations(t)
-	})
-
-	t.Run("SyncStatusLocalChanges", func(t *testing.T) {
-		mockRepo.ExpectedCalls = nil
-		mockRepo.Calls = nil
-		err := os.WriteFile(testFile, []byte("updated content"), 0644)
-		assert.NoError(t, err)
-		setSyncInfo(testFile, "oldhash", "sha123")
-		status, err := fileManager.GetSyncStatus(testFile)
-		assert.NoError(t, err)
-		t.Logf("Sync status before test: %v", status)
-		assert.Equal(t, storage.SyncStatusLocalChanges, status)
-		mockRepo.On("UpdateFile", mock.Anything, "test.txt", "updated content").Return(nil).Once()
-		err = sync.SyncFile(context.Background(), testFile)
-		assert.NoError(t, err)
-		mockRepo.AssertExpectations(t)
-	})
-
-	t.Run("SyncStatusRemoteChanges", func(t *testing.T) {
-		mockRepo.ExpectedCalls = nil
-		mockRepo.Calls = nil
-		content, _ := os.ReadFile(testFile)
-		h := sha256.Sum256(content)
-		hash := hex.EncodeToString(h[:])
-		setSyncInfo(testFile, hash, "oldsha")
-		status, err := fileManager.GetSyncStatus(testFile)
-		assert.NoError(t, err)
-		t.Logf("Sync status before test: %v", status)
-		assert.Equal(t, storage.SyncStatusRemoteChanges, status)
-		mockRepo.On("GetFile", mock.Anything, "test.txt").Return("remote content", nil).Once()
-		err = sync.SyncFile(context.Background(), testFile)
-		assert.NoError(t, err)
-		content, err = os.ReadFile(testFile)
-		assert.NoError(t, err)
-		assert.Equal(t, "remote content", string(content))
-		mockRepo.AssertExpectations(t)
-	})
-
-	t.Run("SyncStatusConflict", func(t *testing.T) {
-		mockRepo.ExpectedCalls = nil
-		mockRepo.Calls = nil
-		err := os.WriteFile(testFile, []byte("local content"), 0644)
-		assert.NoError(t, err)
-		setSyncInfo(testFile, "oldhash", "oldsha")
-		status, err := fileManager.GetSyncStatus(testFile)
-		assert.NoError(t, err)
-		t.Logf("Sync status before test: %v", status)
-		assert.Equal(t, storage.SyncStatusConflict, status)
-		mockRepo.On("GetFile", mock.Anything, "test.txt").Return("remote content", nil).Once()
-		err = sync.SyncFile(context.Background(), testFile)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "conflict detected")
-		localConflict := filepath.Join(tempDir, ".catapult", "conflicts", "test.txt.local")
-		remoteConflict := filepath.Join(tempDir, ".catapult", "conflicts", "test.txt.remote")
-		assert.FileExists(t, localConflict)
-		assert.FileExists(t, remoteConflict)
-		localContent, err := os.ReadFile(localConflict)
-		assert.NoError(t, err)
-		assert.Equal(t, "local content", string(localContent))
-		remoteContent, err := os.ReadFile(remoteConflict)
-		assert.NoError(t, err)
-		assert.Equal(t, "remote content", string(remoteContent))
-		mockRepo.AssertExpectations(t)
-	})
-}
-
-func TestPullFile(t *testing.T) {
-	// Create temporary directory
-	tempDir, err := os.MkdirTemp("", "catapult-test-*")
-	assert.NoError(t, err)
-	defer os.RemoveAll(tempDir)
-
-	// Create test file
-	testFile := filepath.Join(tempDir, "test.txt")
-	err = os.WriteFile(testFile, []byte("test content"), 0644)
+	// Scan directory to track files
+	err = fileManager.ScanDirectory()
 	assert.NoError(t, err)
 
-	// Create file manager
-	fileManager := storage.NewFileManager(tempDir)
-	err = fileManager.AddFile(testFile)
-	assert.NoError(t, err)
-
-	// Create mock repository
-	mockRepo := new(MockRepository)
-
-	// Create sync instance
-	sync := New(mockRepo, fileManager)
-
-	// Вспомогательная функция для выставления sync info
-	setSyncInfo := func(path, lastSyncedHash, lastSyncedRemoteSHA string) {
-		fi, _ := fileManager.GetFileInfo(path)
-		fi.LastSyncedHash = lastSyncedHash
-		fi.LastSyncedRemoteSHA = lastSyncedRemoteSHA
-	}
-
-	t.Run("SyncStatusSynced", func(t *testing.T) {
+	t.Run("NewFile", func(t *testing.T) {
 		mockRepo.ExpectedCalls = nil
 		mockRepo.Calls = nil
-		content, _ := os.ReadFile(testFile)
-		h := sha256.Sum256(content)
-		hash := hex.EncodeToString(h[:])
-		setSyncInfo(testFile, hash, "sha123")
-		status, err := fileManager.GetSyncStatus(testFile)
-		assert.NoError(t, err)
-		t.Logf("Sync status before test: %v", status)
-		assert.Equal(t, storage.SyncStatusSynced, status)
-		err = sync.PullFile(context.Background(), testFile)
-		assert.NoError(t, err)
+
+		// Mock FileExists to return false
+		mockRepo.On("FileExists", mock.Anything, "test.txt").Return(false, nil).Once()
+
+		// Mock CreateFile
+		mockRepo.On("CreateFile", mock.Anything, "test.txt", "test content").Return(nil).Once()
+
+		// Run sync
+		result := syncer.syncFile(context.Background(), &storage.FileInfo{
+			Path: testFile,
+			Hash: "testhash",
+		})
+		assert.NoError(t, result.Error)
+		assert.Equal(t, SyncStatusLocalChanges, result.Status)
 		mockRepo.AssertExpectations(t)
 	})
 
-	t.Run("SyncStatusLocalChanges", func(t *testing.T) {
+	t.Run("ExistingFileNoChanges", func(t *testing.T) {
 		mockRepo.ExpectedCalls = nil
 		mockRepo.Calls = nil
-		err := os.WriteFile(testFile, []byte("local content"), 0644)
-		assert.NoError(t, err)
-		setSyncInfo(testFile, "oldhash", "sha123")
-		status, err := fileManager.GetSyncStatus(testFile)
-		assert.NoError(t, err)
-		t.Logf("Sync status before test: %v", status)
-		assert.Equal(t, storage.SyncStatusLocalChanges, status)
-		mockRepo.On("GetFile", mock.Anything, "test.txt").Return("remote content", nil).Once()
-		err = sync.PullFile(context.Background(), testFile)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "conflict detected")
-		localConflict := filepath.Join(tempDir, ".catapult", "conflicts", "test.txt.local")
-		remoteConflict := filepath.Join(tempDir, ".catapult", "conflicts", "test.txt.remote")
-		assert.FileExists(t, localConflict)
-		assert.FileExists(t, remoteConflict)
-		localContent, err := os.ReadFile(localConflict)
-		assert.NoError(t, err)
-		assert.Equal(t, "local content", string(localContent))
-		remoteContent, err := os.ReadFile(remoteConflict)
-		assert.NoError(t, err)
-		assert.Equal(t, "remote content", string(remoteContent))
+
+		// Mock FileExists to return true
+		mockRepo.On("FileExists", mock.Anything, "test.txt").Return(true, nil).Once()
+
+		// Mock GetFile to return same content
+		mockRepo.On("GetFile", mock.Anything, "test.txt").Return("test content", nil).Once()
+
+		// Run sync
+		result := syncer.syncFile(context.Background(), &storage.FileInfo{
+			Path: testFile,
+			Hash: "testhash",
+		})
+		assert.NoError(t, result.Error)
+		assert.Equal(t, SyncStatusSynced, result.Status)
 		mockRepo.AssertExpectations(t)
 	})
 
-	t.Run("SyncStatusRemoteChanges", func(t *testing.T) {
+	t.Run("ExistingFileWithChanges", func(t *testing.T) {
 		mockRepo.ExpectedCalls = nil
 		mockRepo.Calls = nil
-		content, _ := os.ReadFile(testFile)
-		h := sha256.Sum256(content)
-		hash := hex.EncodeToString(h[:])
-		setSyncInfo(testFile, hash, "oldsha")
-		status, err := fileManager.GetSyncStatus(testFile)
-		assert.NoError(t, err)
-		t.Logf("Sync status before test: %v", status)
-		assert.Equal(t, storage.SyncStatusRemoteChanges, status)
+
+		// Mock FileExists to return true
+		mockRepo.On("FileExists", mock.Anything, "test.txt").Return(true, nil).Once()
+
+		// Mock GetFile to return different content
 		mockRepo.On("GetFile", mock.Anything, "test.txt").Return("remote content", nil).Once()
-		err = sync.PullFile(context.Background(), testFile)
-		assert.NoError(t, err)
-		content, err = os.ReadFile(testFile)
-		assert.NoError(t, err)
-		assert.Equal(t, "remote content", string(content))
+
+		// Mock UpdateFile
+		mockRepo.On("UpdateFile", mock.Anything, "test.txt", "test content").Return(nil).Once()
+
+		// Run sync
+		result := syncer.syncFile(context.Background(), &storage.FileInfo{
+			Path: testFile,
+			Hash: "testhash",
+		})
+		assert.NoError(t, result.Error)
+		assert.Equal(t, SyncStatusConflict, result.Status)
+		mockRepo.AssertExpectations(t)
+	})
+
+	t.Run("FileExistsError", func(t *testing.T) {
+		mockRepo.ExpectedCalls = nil
+		mockRepo.Calls = nil
+
+		// Mock FileExists to return error
+		mockRepo.On("FileExists", mock.Anything, "test.txt").Return(false, assert.AnError).Once()
+
+		// Run sync
+		result := syncer.syncFile(context.Background(), &storage.FileInfo{
+			Path: testFile,
+			Hash: "testhash",
+		})
+		assert.Error(t, result.Error)
+		assert.Equal(t, assert.AnError, result.Error)
 		mockRepo.AssertExpectations(t)
 	})
 }

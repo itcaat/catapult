@@ -152,10 +152,10 @@ func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, err
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
 
-	fmt.Println("\nWaiting for authorization...")
+	fmt.Println("Waiting for authorization...")
 	fmt.Println("Please complete the authorization in your browser.")
 	fmt.Println("This window will automatically continue once you've authorized the application.")
-	fmt.Println("(Press Ctrl+C to cancel)\n")
+	fmt.Println("(Press Ctrl+C to cancel)")
 
 	lastDot := time.Now()
 	for {

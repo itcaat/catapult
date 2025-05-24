@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -54,56 +55,67 @@ func (fm *FileManager) BaseDir() string {
 	return fm.baseDir
 }
 
-// AddFile adds a file to the tracking list
-func (fm *FileManager) AddFile(path string) error {
-	// Get absolute path
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path: %w", err)
-	}
+// ScanDirectory scans the base directory for files and updates the tracking list
+func (fm *FileManager) ScanDirectory() error {
+	// Clear existing files
+	fm.files = make(map[string]*FileInfo)
 
-	// Check if file exists
-	info, err := os.Stat(absPath)
-	if err != nil {
-		return fmt.Errorf("failed to get file info: %w", err)
-	}
+	// Walk through the directory
+	err := filepath.Walk(fm.baseDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
 
-	// Calculate file hash
-	hash, err := fm.calculateFileHash(absPath)
-	if err != nil {
-		return fmt.Errorf("failed to calculate file hash: %w", err)
-	}
+		// Skip directories and hidden files
+		if info.IsDir() {
+			return nil
+		}
 
-	// Create file info
-	fileInfo := &FileInfo{
-		Path:         absPath,
-		Hash:         hash,
-		LastModified: info.ModTime(),
-		Size:         info.Size(),
-	}
+		if strings.HasPrefix(info.Name(), ".") {
+			return nil
+		}
 
-	// Add to tracking list
-	fm.files[absPath] = fileInfo
+		// Skip .catapult directory files except for the files we want to sync
+		if strings.Contains(path, ".catapult") && !strings.Contains(path, ".catapult/files") {
+			return nil
+		}
 
-	return nil
-}
+		// Skip state.json and config files
+		if info.Name() == "state.json" || strings.HasSuffix(info.Name(), ".runtime.yaml") || strings.HasSuffix(info.Name(), ".yaml") {
+			return nil
+		}
 
-// RemoveFile removes a file from the tracking list
-func (fm *FileManager) RemoveFile(path string) error {
-	// Get absolute path
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path: %w", err)
-	}
+		// Calculate file hash
+		hash, err := fm.calculateFileHash(path)
+		if err != nil {
+			return fmt.Errorf("failed to calculate file hash: %w", err)
+		}
 
-	// Remove from tracking list
-	delete(fm.files, absPath)
+		// Create file info
+		fileInfo := &FileInfo{
+			Path:         path,
+			Hash:         hash,
+			LastModified: info.ModTime(),
+			Size:         info.Size(),
+		}
 
-	return nil
+		// Add to tracking list
+		fm.files[path] = fileInfo
+
+		return nil
+	})
+
+	return err
 }
 
 // GetTrackedFiles returns a list of tracked files
 func (fm *FileManager) GetTrackedFiles() []*FileInfo {
+	// Scan directory before returning files
+	if err := fm.ScanDirectory(); err != nil {
+		// Log error but continue
+		fmt.Printf("Warning: failed to scan directory: %v\n", err)
+	}
+
 	files := make([]*FileInfo, 0, len(fm.files))
 	for _, file := range fm.files {
 		files = append(files, file)
@@ -219,6 +231,11 @@ func (fm *FileManager) LoadState(path string) error {
 	}
 
 	return nil
+}
+
+// CalculateFileHash calculates the SHA-256 hash of a file (public method)
+func (fm *FileManager) CalculateFileHash(path string) (string, error) {
+	return fm.calculateFileHash(path)
 }
 
 // calculateFileHash calculates the SHA-256 hash of a file
