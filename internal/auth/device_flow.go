@@ -157,6 +157,7 @@ func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, err
 	fmt.Println("This window will automatically continue once you've authorized the application.")
 	fmt.Println("(Press Ctrl+C to cancel)\n")
 
+	lastDot := time.Now()
 	for {
 		select {
 		case <-timeout:
@@ -175,24 +176,30 @@ func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, err
 				return nil, fmt.Errorf("failed to read response: %w", err)
 			}
 
-			// Print response for debugging
-			fmt.Printf("Poll response: %s\n", string(data))
-
 			// Check status code
 			if resp.StatusCode != http.StatusOK {
 				// Check for specific error responses
 				var errorResp struct {
-					Error string `json:"error"`
+					Error            string `json:"error"`
+					ErrorDescription string `json:"error_description"`
+					Interval         int    `json:"interval"`
 				}
 				if err := json.Unmarshal(data, &errorResp); err == nil {
 					switch errorResp.Error {
 					case "authorization_pending":
-						fmt.Print(".") // Show progress
+						// Show progress dot every 5 seconds
+						if time.Since(lastDot) >= 5*time.Second {
+							fmt.Print(".")
+							lastDot = time.Now()
+						}
 						continue
 					case "slow_down":
-						// Add 5 seconds to the interval
-						ticker.Reset(time.Duration(interval+5) * time.Second)
-						fmt.Print(".") // Show progress
+						// Update interval and show message
+						newInterval := errorResp.Interval
+						if newInterval > 0 {
+							ticker.Reset(time.Duration(newInterval) * time.Second)
+							fmt.Printf("\nGitHub requested to slow down. Waiting %d seconds between checks...\n", newInterval)
+						}
 						continue
 					case "expired_token":
 						return nil, fmt.Errorf("device code expired")
@@ -211,7 +218,6 @@ func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, err
 
 			// Verify we got a valid token
 			if token.AccessToken == "" {
-				fmt.Print(".") // Show progress
 				continue
 			}
 

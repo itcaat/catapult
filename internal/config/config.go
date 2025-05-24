@@ -8,108 +8,124 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds the application configuration
-type Config struct {
+// StaticConfig holds the static (base) configuration
+// Only fields that do not change at runtime
+// (clientid, scopes, repo name)
+type StaticConfig struct {
 	GitHub struct {
-		ClientID string   `mapstructure:"clientid"`
-		Scopes   []string `mapstructure:"scopes"`
-		Token    string   `mapstructure:"token"`
-	} `mapstructure:"github"`
-	Storage struct {
-		TokenPath string `mapstructure:"tokenpath"`
-		BaseDir   string `mapstructure:"basedir"`
-		StatePath string `mapstructure:"statepath"`
-	} `mapstructure:"storage"`
+		ClientID string   `yaml:"clientid"`
+		Scopes   []string `yaml:"scopes"`
+	} `yaml:"github"`
 	Repository struct {
-		Name string `mapstructure:"name"`
-	} `mapstructure:"repository"`
+		Name string `yaml:"name"`
+	} `yaml:"repository"`
 }
 
-// Load loads the configuration from the config file
+// RuntimeConfig holds dynamic fields (token, paths)
+type RuntimeConfig struct {
+	GitHub struct {
+		Token string `yaml:"token"`
+	} `yaml:"github"`
+	Storage struct {
+		TokenPath string `yaml:"tokenpath"`
+		BaseDir   string `yaml:"basedir"`
+		StatePath string `yaml:"statepath"`
+	} `yaml:"storage"`
+}
+
+// Config is the merged config for use in the app
+// (not saved directly)
+type Config struct {
+	GitHub struct {
+		ClientID string
+		Scopes   []string
+		Token    string
+	}
+	Storage struct {
+		TokenPath string
+		BaseDir   string
+		StatePath string
+	}
+	Repository struct {
+		Name string
+	}
+}
+
+// Load loads config.yaml (static) and ~/.catapult/config.runtime.yaml (dynamic), merges them
 func Load() (*Config, error) {
-	// Get home directory
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	// Set default values
-	cfg := &Config{}
-	cfg.GitHub.Scopes = []string{"repo"}
-	cfg.Repository.Name = "catapult-folder"
-	cfg.Storage.BaseDir = filepath.Join(home, ".catapult", "files")
-	cfg.Storage.StatePath = filepath.Join(home, ".catapult", "state.json")
-
-	// Try to load config from current directory first
+	// 1. Load static config from current dir
+	staticCfg := &StaticConfig{}
 	currentDir, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current directory: %w", err)
 	}
-
-	// Try local config first
-	localConfigPath := filepath.Join(currentDir, "config.yaml")
-	data, err := os.ReadFile(localConfigPath)
-	if err == nil {
-		// Local config exists, unmarshal it
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal local config: %w", err)
-		}
-		return cfg, nil
+	staticPath := filepath.Join(currentDir, "config.yaml")
+	if data, err := os.ReadFile(staticPath); err == nil {
+		yaml.Unmarshal(data, staticCfg)
+	}
+	// Defaults if not set
+	if staticCfg.GitHub.Scopes == nil || len(staticCfg.GitHub.Scopes) == 0 {
+		staticCfg.GitHub.Scopes = []string{"repo"}
+	}
+	if staticCfg.Repository.Name == "" {
+		staticCfg.Repository.Name = "catapult-folder"
 	}
 
-	// If local config doesn't exist, try home directory
-	configDir := filepath.Join(home, ".catapult")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create config directory: %w", err)
+	// 2. Load runtime config from home dir
+	runtimeCfg := &RuntimeConfig{}
+	runtimePath := filepath.Join(home, ".catapult", "config.runtime.yaml")
+	if data, err := os.ReadFile(runtimePath); err == nil {
+		yaml.Unmarshal(data, runtimeCfg)
+	}
+	// Set runtime defaults if not set
+	if runtimeCfg.Storage.BaseDir == "" {
+		runtimeCfg.Storage.BaseDir = filepath.Join(home, ".catapult", "files")
+	}
+	if runtimeCfg.Storage.StatePath == "" {
+		runtimeCfg.Storage.StatePath = filepath.Join(home, ".catapult", "state.json")
 	}
 
-	// Read config file from home directory
-	configPath := filepath.Join(configDir, "config.yaml")
-	data, err = os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Create default config file
-			if err := cfg.Save(); err != nil {
-				return nil, fmt.Errorf("failed to create default config: %w", err)
-			}
-			return cfg, nil
-		}
-		return nil, fmt.Errorf("failed to read config file: %w", err)
-	}
-
-	// Unmarshal config
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
-	}
+	// 3. Merge
+	cfg := &Config{}
+	cfg.GitHub.ClientID = staticCfg.GitHub.ClientID
+	cfg.GitHub.Scopes = staticCfg.GitHub.Scopes
+	cfg.GitHub.Token = runtimeCfg.GitHub.Token
+	cfg.Repository.Name = staticCfg.Repository.Name
+	cfg.Storage.BaseDir = runtimeCfg.Storage.BaseDir
+	cfg.Storage.StatePath = runtimeCfg.Storage.StatePath
+	cfg.Storage.TokenPath = runtimeCfg.Storage.TokenPath
 
 	return cfg, nil
 }
 
-// Save saves the configuration to the config file
+// Save saves only the runtime config (token, paths) to ~/.catapult/config.runtime.yaml
 func (c *Config) Save() error {
-	// Get home directory
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("failed to get home directory: %w", err)
 	}
-
-	// Create config directory if it doesn't exist
 	configDir := filepath.Join(home, ".catapult")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
+	runtimeCfg := &RuntimeConfig{}
+	runtimeCfg.GitHub.Token = c.GitHub.Token
+	runtimeCfg.Storage.BaseDir = c.Storage.BaseDir
+	runtimeCfg.Storage.StatePath = c.Storage.StatePath
+	runtimeCfg.Storage.TokenPath = c.Storage.TokenPath
 
-	// Marshal config
-	data, err := yaml.Marshal(c)
+	data, err := yaml.Marshal(runtimeCfg)
 	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
+		return fmt.Errorf("failed to marshal runtime config: %w", err)
 	}
-
-	// Write config file
-	configPath := filepath.Join(configDir, "config.yaml")
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
+	runtimePath := filepath.Join(configDir, "config.runtime.yaml")
+	if err := os.WriteFile(runtimePath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write runtime config: %w", err)
 	}
-
 	return nil
 }

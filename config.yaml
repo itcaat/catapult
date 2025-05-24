@@ -2,10 +2,8 @@ github:
   clientid: "Ov23liVBxOiGZXrFZNB6"
   scopes:
     - repo
-  token: "" # Will be set after authentication
 
 storage:
-  tokenpath: "~/.catapult/token.json"
   basedir: "~/.catapult/files"
   statepath: "~/.catapult/state.json"
 
