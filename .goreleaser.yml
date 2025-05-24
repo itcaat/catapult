@@ -111,6 +111,7 @@ brews:
       owner: itcaat
       name: homebrew-tap
       branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     
     # Formula details
     name: catapult
