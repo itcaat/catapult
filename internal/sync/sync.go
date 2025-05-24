@@ -44,21 +44,52 @@ func New(repo repository.Repository, fileManager *storage.FileManager) *Syncer {
 
 // SyncAll synchronizes all files in the directory
 func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
-	// Scan directory for files
+	// Scan directory for local files
 	if err := s.fileManager.ScanDirectory(); err != nil {
 		return fmt.Errorf("failed to scan directory: %w", err)
 	}
 
-	// Get all files
-	files := s.fileManager.GetTrackedFiles()
-	fmt.Fprintf(out, "Syncing %d files...\n", len(files))
+	// Get local files
+	localFiles := s.fileManager.GetTrackedFiles()
+
+	// Get remote files
+	remoteFiles, err := s.repo.ListFiles(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list remote files: %w", err)
+	}
+
+	// Create a map of all files (local + remote)
+	allFiles := make(map[string]*storage.FileInfo)
+
+	// Add local files
+	for _, file := range localFiles {
+		relPath, err := filepath.Rel(s.fileManager.BaseDir(), file.Path)
+		if err != nil {
+			return fmt.Errorf("failed to get relative path: %w", err)
+		}
+		allFiles[relPath] = file
+	}
+
+	// Add remote files that don't exist locally
+	for _, remotePath := range remoteFiles {
+		if _, exists := allFiles[remotePath]; !exists {
+			// Create a virtual FileInfo for remote-only file
+			localPath := filepath.Join(s.fileManager.BaseDir(), remotePath)
+			allFiles[remotePath] = &storage.FileInfo{
+				Path: localPath,
+				Hash: "", // Will be calculated when downloaded
+			}
+		}
+	}
+
+	fmt.Fprintf(out, "Syncing %d files...\n", len(allFiles))
 
 	// Track results
 	var synced, updated, pulled, conflicted int
 
 	// Sync each file
-	for _, file := range files {
-		result := s.syncFile(ctx, file)
+	for relPath, file := range allFiles {
+		result := s.syncFileByPath(ctx, file, relPath)
 		switch result.Status {
 		case SyncStatusSynced:
 			synced++
@@ -84,14 +115,8 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 	return nil
 }
 
-// syncFile synchronizes a single file
-func (s *Syncer) syncFile(ctx context.Context, file *storage.FileInfo) SyncResult {
-	// Get relative path
-	relPath, err := filepath.Rel(s.fileManager.BaseDir(), file.Path)
-	if err != nil {
-		return SyncResult{Path: file.Path, Error: err}
-	}
-
+// syncFileByPath synchronizes a single file using relative path
+func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, relPath string) SyncResult {
 	// Check if file exists in remote
 	exists, err := s.repo.FileExists(ctx, relPath)
 	if err != nil {
@@ -99,7 +124,12 @@ func (s *Syncer) syncFile(ctx context.Context, file *storage.FileInfo) SyncResul
 	}
 
 	if !exists {
-		// File doesn't exist in remote, create it
+		// File doesn't exist in remote, create it if it exists locally
+		if _, err := os.Stat(file.Path); os.IsNotExist(err) {
+			// Neither local nor remote exists - this shouldn't happen
+			return SyncResult{Path: file.Path, Status: SyncStatusSynced}
+		}
+
 		content, err := os.ReadFile(file.Path)
 		if err != nil {
 			return SyncResult{Path: file.Path, Error: err}
@@ -127,7 +157,17 @@ func (s *Syncer) syncFile(ctx context.Context, file *storage.FileInfo) SyncResul
 	_, err = os.Stat(file.Path)
 	if os.IsNotExist(err) {
 		// Local file doesn't exist, download remote file
+		// Create directory if it doesn't exist
+		if err := os.MkdirAll(filepath.Dir(file.Path), 0755); err != nil {
+			return SyncResult{Path: file.Path, Error: err}
+		}
+
 		if err := os.WriteFile(file.Path, []byte(remoteContent), 0644); err != nil {
+			return SyncResult{Path: file.Path, Error: err}
+		}
+
+		// Rescan directory to pick up the newly downloaded file
+		if err := s.fileManager.ScanDirectory(); err != nil {
 			return SyncResult{Path: file.Path, Error: err}
 		}
 

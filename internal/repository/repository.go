@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/google/go-github/v57/github"
@@ -17,6 +18,7 @@ type Repository interface {
 	UpdateFile(ctx context.Context, path, content string) error
 	DeleteFile(ctx context.Context, path string) error
 	FileExists(ctx context.Context, path string) (bool, error)
+	ListFiles(ctx context.Context) ([]string, error)
 }
 
 // GitHubRepository implements the Repository interface using GitHub API
@@ -164,4 +166,49 @@ func (r *GitHubRepository) FileExists(ctx context.Context, path string) (bool, e
 	}
 
 	return true, nil
+}
+
+// ListFiles gets all files from the repository
+func (r *GitHubRepository) ListFiles(ctx context.Context) ([]string, error) {
+	files := []string{}
+
+	// Get repository contents recursively
+	err := r.listFilesRecursive(ctx, "", &files)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list files: %w", err)
+	}
+
+	return files, nil
+}
+
+// listFilesRecursive recursively lists files in a directory
+func (r *GitHubRepository) listFilesRecursive(ctx context.Context, path string, files *[]string) error {
+	_, directoryContent, _, err := r.client.Repositories.GetContents(ctx, r.owner, r.name, path, &github.RepositoryContentGetOptions{
+		Ref: "main",
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, content := range directoryContent {
+		if content.GetType() == "file" {
+			if path == "" {
+				*files = append(*files, content.GetName())
+			} else {
+				*files = append(*files, filepath.Join(path, content.GetName()))
+			}
+		} else if content.GetType() == "dir" {
+			// Recursively get files from subdirectory
+			subPath := content.GetName()
+			if path != "" {
+				subPath = filepath.Join(path, content.GetName())
+			}
+			err := r.listFilesRecursive(ctx, subPath, files)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }

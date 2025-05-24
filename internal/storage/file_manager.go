@@ -57,6 +57,12 @@ func (fm *FileManager) BaseDir() string {
 
 // ScanDirectory scans the base directory for files and updates the tracking list
 func (fm *FileManager) ScanDirectory() error {
+	// Save existing files data to preserve sync info
+	existingFiles := make(map[string]*FileInfo)
+	for path, info := range fm.files {
+		existingFiles[path] = info
+	}
+
 	// Clear existing files
 	fm.files = make(map[string]*FileInfo)
 
@@ -97,6 +103,12 @@ func (fm *FileManager) ScanDirectory() error {
 			Hash:         hash,
 			LastModified: info.ModTime(),
 			Size:         info.Size(),
+		}
+
+		// Preserve sync info if file was already tracked
+		if existingInfo, exists := existingFiles[path]; exists {
+			fileInfo.LastSyncedHash = existingInfo.LastSyncedHash
+			fileInfo.LastSyncedRemoteSHA = existingInfo.LastSyncedRemoteSHA
 		}
 
 		// Add to tracking list
