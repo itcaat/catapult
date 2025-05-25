@@ -20,6 +20,11 @@ func NewInitCmd() *cobra.Command {
 		Short: "Initialize Catapult",
 		Long:  `Initialize Catapult by setting up authentication and repository.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Ensure ~/.catapult/config.yaml exists
+			if err := config.EnsureUserConfig(); err != nil {
+				return fmt.Errorf("failed to ensure user config: %w", err)
+			}
+
 			// Load configuration
 			cfg, err := config.Load()
 			if err != nil {

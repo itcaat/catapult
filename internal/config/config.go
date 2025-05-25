@@ -129,3 +129,49 @@ func (c *Config) Save() error {
 	}
 	return nil
 }
+
+// EnsureUserConfig checks if ~/.catapult/config.yaml exists and creates it with default content if it doesn't
+func EnsureUserConfig() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	configDir := filepath.Join(home, ".catapult")
+	configPath := filepath.Join(configDir, "config.yaml")
+
+	// Check if config file already exists
+	if _, err := os.Stat(configPath); err == nil {
+		// File exists, nothing to do
+		return nil
+	} else if !os.IsNotExist(err) {
+		// Some other error occurred
+		return fmt.Errorf("failed to check config file: %w", err)
+	}
+
+	// File doesn't exist, create directory if needed
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	// Generate default config content
+	defaultConfig := `github:
+  clientid: "Ov23liVBxOiGZXrFZNB6"
+  scopes:
+    - repo
+
+storage:
+  basedir: "~/Catapult"
+  statepath: "~/.catapult/state.json"
+
+repository:
+  name: "catapult-folder"`
+
+	// Write the default config file
+	if err := os.WriteFile(configPath, []byte(defaultConfig), 0644); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	fmt.Printf("Generated default config file: %s\n", configPath)
+	return nil
+}
