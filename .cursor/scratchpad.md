@@ -936,6 +936,69 @@ repository:
 
 **Ready for next task** - This feature is complete and working as requested.
 
+### ✅ **COMPLETED: Config File Fix for Missing Local Config**
+
+**Issue**: After removing `config.yaml` from the repository, `catapult init` failed with 404 error because the GitHub client ID was empty.
+
+**Root Cause**: The configuration system loads static config from the current directory's `config.yaml` file. When this file was missing, the GitHub client ID was not loaded, causing authentication to fail.
+
+**Solution**: Enhanced `EnsureUserConfig()` function to check for and generate **both** config files:
+1. `~/.catapult/config.yaml` (user config) - as originally requested
+2. `./config.yaml` (local config) - needed for the current config loading system
+
+**Implementation**:
+- Modified `internal/config/config.go` to generate both config files if missing
+- Both files get the same default content with the GitHub client ID
+- Clear user feedback for each file generated
+- No overwriting of existing files
+
+**Testing Results**:
+- ✅ **Local config generated**: `Generated default config file: /path/to/catapult/config.yaml`
+- ✅ **Authentication working**: GitHub client ID loaded correctly (no longer empty)
+- ✅ **Both files created**: Local and user config files both exist with correct content
+- ✅ **All tests pass**: 31/31 tests passing (100% success rate)
+
+**User Experience**:
+```bash
+$ ./catapult init
+Generated default config file: /Users/user/project/config.yaml
+Requesting device code from: https://github.com/login/device/code
+With client_id: Ov23liVBxOiGZXrFZNB6  # ✅ Now working!
+```
+
+**Files Modified**:
+- `internal/config/config.go` - Enhanced `EnsureUserConfig()` to handle both config locations
+
+**Issue resolved** - `catapult init` now works correctly even when `config.yaml` is missing from the repository.
+
+### ✅ **FINAL: Switched to User-Only Config System**
+
+**Change**: Modified the configuration system to generate and read from `~/.catapult/config.yaml` only, as requested.
+
+**Implementation**:
+1. **Updated `Load()` function**: Now reads static config from `~/.catapult/config.yaml` instead of local `./config.yaml`
+2. **Simplified `EnsureUserConfig()`**: Only generates `~/.catapult/config.yaml`, no local config file
+3. **Removed local config dependency**: System no longer requires `config.yaml` in the project directory
+
+**Testing Results**:
+- ✅ **User config only**: Only `~/.catapult/config.yaml` is generated
+- ✅ **No local config**: No `./config.yaml` file created or required
+- ✅ **Authentication working**: GitHub client ID loaded correctly from user config
+- ✅ **All tests pass**: 31/31 tests passing (100% success rate)
+
+**User Experience**:
+```bash
+$ ./catapult init
+Generated default config file: /Users/user/.catapult/config.yaml
+Requesting device code from: https://github.com/login/device/code
+With client_id: Ov23liVBxOiGZXrFZNB6  # ✅ Loaded from ~/.catapult/config.yaml
+```
+
+**Files Modified**:
+- `internal/config/config.go` - Updated `Load()` and `EnsureUserConfig()` functions
+
+**Final implementation** - The system now generates and reads configuration exclusively from `~/.catapult/config.yaml` as requested.
+
 ## Lessons
 *This section will be updated with learnings and best practices*
 

@@ -51,20 +51,16 @@ type Config struct {
 	}
 }
 
-// Load loads config.yaml (static) and ~/.catapult/config.runtime.yaml (dynamic), merges them
+// Load loads config from ~/.catapult/config.yaml (static) and ~/.catapult/config.runtime.yaml (dynamic), merges them
 func Load() (*Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	// 1. Load static config from current dir
+	// 1. Load static config from ~/.catapult/config.yaml
 	staticCfg := &StaticConfig{}
-	currentDir, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get current directory: %w", err)
-	}
-	staticPath := filepath.Join(currentDir, "config.yaml")
+	staticPath := filepath.Join(home, ".catapult", "config.yaml")
 	if data, err := os.ReadFile(staticPath); err == nil {
 		yaml.Unmarshal(data, staticCfg)
 	}
@@ -137,6 +133,20 @@ func EnsureUserConfig() error {
 		return fmt.Errorf("failed to get home directory: %w", err)
 	}
 
+	// Default config content
+	defaultConfig := `github:
+  clientid: "Ov23liVBxOiGZXrFZNB6"
+  scopes:
+    - repo
+
+storage:
+  basedir: "~/Catapult"
+  statepath: "~/.catapult/state.json"
+
+repository:
+  name: "catapult-folder"`
+
+	// Ensure ~/.catapult/config.yaml exists
 	configDir := filepath.Join(home, ".catapult")
 	configPath := filepath.Join(configDir, "config.yaml")
 
@@ -153,19 +163,6 @@ func EnsureUserConfig() error {
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
-
-	// Generate default config content
-	defaultConfig := `github:
-  clientid: "Ov23liVBxOiGZXrFZNB6"
-  scopes:
-    - repo
-
-storage:
-  basedir: "~/Catapult"
-  statepath: "~/.catapult/state.json"
-
-repository:
-  name: "catapult-folder"`
 
 	// Write the default config file
 	if err := os.WriteFile(configPath, []byte(defaultConfig), 0644); err != nil {
