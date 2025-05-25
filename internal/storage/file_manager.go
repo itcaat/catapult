@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -78,20 +77,6 @@ func (fm *FileManager) ScanDirectory() error {
 
 		// Skip directories and hidden files
 		if info.IsDir() {
-			return nil
-		}
-
-		if strings.HasPrefix(info.Name(), ".") {
-			return nil
-		}
-
-		// Skip .catapult directory files except for the files we want to sync
-		if strings.Contains(path, ".catapult") && !strings.Contains(path, ".catapult/files") {
-			return nil
-		}
-
-		// Skip state.json and config files
-		if info.Name() == "state.json" || strings.HasSuffix(info.Name(), ".runtime.yaml") || strings.HasSuffix(info.Name(), ".yaml") {
 			return nil
 		}
 
