@@ -156,16 +156,22 @@ func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, err
 	fmt.Println("Please complete the authorization in your browser.")
 	fmt.Println("This window will automatically continue once you've authorized the application.")
 	fmt.Println("(Press Ctrl+C to cancel)")
+	fmt.Printf("Polling every %d seconds...\n", interval)
 
 	lastDot := time.Now()
+	pollCount := 0
 	for {
 		select {
 		case <-timeout:
 			return nil, fmt.Errorf("polling timed out after %v", pollTimeout)
 		case <-ticker.C:
+			pollCount++
+			fmt.Printf("[Poll #%d] Checking authorization status...\n", pollCount)
+
 			// Send request
 			resp, err := df.client.Do(req)
 			if err != nil {
+				fmt.Printf("[Poll #%d] Request failed: %v\n", pollCount, err)
 				return nil, fmt.Errorf("failed to send request: %w", err)
 			}
 
@@ -173,54 +179,65 @@ func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, err
 			data, err := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if err != nil {
+				fmt.Printf("[Poll #%d] Failed to read response: %v\n", pollCount, err)
 				return nil, fmt.Errorf("failed to read response: %w", err)
 			}
 
-			// Check status code
-			if resp.StatusCode != http.StatusOK {
-				// Check for specific error responses
-				var errorResp struct {
-					Error            string `json:"error"`
-					ErrorDescription string `json:"error_description"`
-					Interval         int    `json:"interval"`
-				}
-				if err := json.Unmarshal(data, &errorResp); err == nil {
-					switch errorResp.Error {
-					case "authorization_pending":
-						// Show progress dot every 5 seconds
-						if time.Since(lastDot) >= 5*time.Second {
-							fmt.Print(".")
-							lastDot = time.Now()
-						}
-						continue
-					case "slow_down":
-						// Update interval and show message
-						newInterval := errorResp.Interval
-						if newInterval > 0 {
-							ticker.Reset(time.Duration(newInterval) * time.Second)
-							fmt.Printf("\nGitHub requested to slow down. Waiting %d seconds between checks...\n", newInterval)
-						}
-						continue
-					case "expired_token":
-						return nil, fmt.Errorf("device code expired")
-					case "access_denied":
-						return nil, fmt.Errorf("user denied access")
+			fmt.Printf("[Poll #%d] Response status: %d\n", pollCount, resp.StatusCode)
+			fmt.Printf("[Poll #%d] Response body: %s\n", pollCount, string(data))
+
+			// First, try to parse as an error response (GitHub returns errors with 200 status)
+			var errorResp struct {
+				Error            string `json:"error"`
+				ErrorDescription string `json:"error_description"`
+				Interval         int    `json:"interval"`
+			}
+			if err := json.Unmarshal(data, &errorResp); err == nil && errorResp.Error != "" {
+				fmt.Printf("[Poll #%d] Error response: %s - %s\n", pollCount, errorResp.Error, errorResp.ErrorDescription)
+				switch errorResp.Error {
+				case "authorization_pending":
+					// Show progress dot every 5 seconds
+					if time.Since(lastDot) >= 5*time.Second {
+						fmt.Print(".")
+						lastDot = time.Now()
 					}
+					continue
+				case "slow_down":
+					// Update interval and show message
+					newInterval := errorResp.Interval
+					if newInterval > 0 {
+						ticker.Reset(time.Duration(newInterval) * time.Second)
+						fmt.Printf("\nGitHub requested to slow down. Waiting %d seconds between checks...\n", newInterval)
+					}
+					continue
+				case "expired_token":
+					return nil, fmt.Errorf("device code expired")
+				case "access_denied":
+					return nil, fmt.Errorf("user denied access")
+				default:
+					return nil, fmt.Errorf("GitHub error: %s - %s", errorResp.Error, errorResp.ErrorDescription)
 				}
+			}
+
+			// Check for non-200 status codes
+			if resp.StatusCode != http.StatusOK {
 				return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(data))
 			}
 
-			// Parse response
+			// Parse as successful token response
 			var token Token
 			if err := json.Unmarshal(data, &token); err != nil {
+				fmt.Printf("[Poll #%d] Failed to parse token response: %v\n", pollCount, err)
 				return nil, fmt.Errorf("failed to parse response: %w", err)
 			}
 
 			// Verify we got a valid token
 			if token.AccessToken == "" {
+				fmt.Printf("[Poll #%d] Token response missing access_token, continuing...\n", pollCount)
 				continue
 			}
 
+			fmt.Printf("[Poll #%d] Authorization successful! Got access token.\n", pollCount)
 			fmt.Println("\nAuthorization successful!")
 			return &token, nil
 		}
