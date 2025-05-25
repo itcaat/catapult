@@ -27,7 +27,6 @@ type RuntimeConfig struct {
 		Token string `yaml:"token"`
 	} `yaml:"github"`
 	Storage struct {
-		TokenPath string `yaml:"tokenpath"`
 		BaseDir   string `yaml:"basedir"`
 		StatePath string `yaml:"statepath"`
 	} `yaml:"storage"`
@@ -42,7 +41,6 @@ type Config struct {
 		Token    string
 	}
 	Storage struct {
-		TokenPath string
 		BaseDir   string
 		StatePath string
 	}
@@ -94,7 +92,6 @@ func Load() (*Config, error) {
 	cfg.Repository.Name = staticCfg.Repository.Name
 	cfg.Storage.BaseDir = runtimeCfg.Storage.BaseDir
 	cfg.Storage.StatePath = runtimeCfg.Storage.StatePath
-	cfg.Storage.TokenPath = runtimeCfg.Storage.TokenPath
 
 	return cfg, nil
 }
@@ -113,7 +110,6 @@ func (c *Config) Save() error {
 	runtimeCfg.GitHub.Token = c.GitHub.Token
 	runtimeCfg.Storage.BaseDir = c.Storage.BaseDir
 	runtimeCfg.Storage.StatePath = c.Storage.StatePath
-	runtimeCfg.Storage.TokenPath = c.Storage.TokenPath
 
 	data, err := yaml.Marshal(runtimeCfg)
 	if err != nil {
