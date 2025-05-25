@@ -68,6 +68,15 @@ func PrintStatus(fileManager *storage.FileManager, repo repository.Repository, b
 
 // determineFileStatus determines the sync status of a file
 func determineFileStatus(file *storage.FileInfo, remoteFile *repository.RemoteFileInfo) string {
+	// Check if file was deleted locally FIRST (before checking remote existence)
+	if file.Deleted {
+		if remoteFile != nil {
+			return "Deleted locally (needs remote deletion)"
+		} else {
+			return "Deleted locally"
+		}
+	}
+
 	// Check if file exists remotely
 	if remoteFile == nil {
 		return "Local-only"
@@ -79,11 +88,6 @@ func determineFileStatus(file *storage.FileInfo, remoteFile *repository.RemoteFi
 	// If file doesn't exist locally but exists remotely
 	if !localExists {
 		return "Remote-only"
-	}
-
-	// Check if file was deleted locally
-	if file.Deleted {
-		return "Deleted locally"
 	}
 
 	// Compare hashes to determine status
