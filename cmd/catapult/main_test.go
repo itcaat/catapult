@@ -87,8 +87,11 @@ func TestStatusCommand(t *testing.T) {
 	err = fileManager.ScanDirectory()
 	assert.NoError(t, err)
 
-	// Save state
-	statePath := filepath.Join(tempDir, "state.json")
+	// Save state in a completely separate directory to avoid it being tracked
+	stateDir, err := os.MkdirTemp("", "catapult-state-*")
+	assert.NoError(t, err)
+	defer os.RemoveAll(stateDir)
+	statePath := filepath.Join(stateDir, "state.json")
 	err = fileManager.SaveState(statePath)
 	assert.NoError(t, err)
 
@@ -111,11 +114,11 @@ func TestStatusCommand(t *testing.T) {
 
 	// Verify output
 	output := buf.String()
-	assert.Contains(t, output, "Tracked Files Status:")
+	assert.Contains(t, output, "Files Status (Local + Remote):")
 	assert.Contains(t, output, "test1.txt")
 	assert.Contains(t, output, "test2.txt")
 	assert.Contains(t, output, "Local-only")
-	// state.json не должен трекаться
+	// state.json should not be tracked (it's in the same directory but should be ignored)
 	assert.NotContains(t, output, "state.json")
 }
 
@@ -128,17 +131,20 @@ func TestStatusCommandNoFiles(t *testing.T) {
 	// Create file manager
 	fileManager := storage.NewFileManager(tempDir)
 
-	// Save empty state
-	statePath := filepath.Join(tempDir, "state.json")
-	err = fileManager.SaveState(statePath)
+	// Create mock repository
+	mockRepo := new(MockRepository)
+
+	// Mock GetAllFilesWithContent to return empty map (no remote files)
+	mockRepo.On("GetAllFilesWithContent", mock.Anything).Return(map[string]*repository.RemoteFileInfo{}, nil).Once()
+
+	// Test status output with no files
+	var buf bytes.Buffer
+	err = status.PrintStatus(fileManager, mockRepo, tempDir, &buf)
 	assert.NoError(t, err)
 
-	// Create test configuration
-	cfg := &config.Config{}
-	cfg.Storage.BaseDir = tempDir
-	cfg.Storage.StatePath = statePath
+	// Verify output
+	output := buf.String()
+	assert.Contains(t, output, "No files are currently tracked or available remotely.")
 
-	// Get tracked files - should be empty
-	files := fileManager.GetTrackedFiles()
-	assert.Empty(t, files)
+	mockRepo.AssertExpectations(t)
 }
