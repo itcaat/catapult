@@ -920,6 +920,62 @@ repository:
 
 🎉 **CONFIGURATION SIMPLIFICATION COMPLETE** - Users now have a single, secure, easy-to-understand config file!
 
+### ✅ **HOTFIX: Tilde Path Expansion Issue**
+
+**Issue Discovered**: After testing the new configuration system, found that the default config template was using tilde paths (`~/Catapult`, `~/.catapult/state.json`) which caused runtime errors when the application tried to access these paths literally.
+
+**Root Cause**: The `EnsureUserConfig()` function was generating config with tilde paths, but the application expected absolute paths for file operations.
+
+**Solution Implemented**:
+1. **Updated default config generation** - Now uses `fmt.Sprintf()` with absolute paths
+2. **Added tilde expansion function** - `expandTildePath()` helper for manual config edits
+3. **Enhanced Load() function** - Automatically expands tilde paths when loading config
+4. **Added comprehensive test** - `TestTildePathExpansion()` to verify functionality
+
+**Code Changes**:
+```go
+// Before (problematic)
+defaultConfig := `storage:
+  basedir: "~/Catapult"
+  statepath: "~/.catapult/state.json"`
+
+// After (fixed)
+defaultConfig := fmt.Sprintf(`storage:
+  basedir: "%s"
+  statepath: "%s"`, 
+    filepath.Join(home, "Catapult"),
+    filepath.Join(home, ".catapult", "state.json"))
+
+// Added tilde expansion for manual edits
+cfg.Storage.BaseDir = expandTildePath(cfg.Storage.BaseDir, home)
+cfg.Storage.StatePath = expandTildePath(cfg.Storage.StatePath, home)
+```
+
+**Testing Results**:
+- ✅ **Generated config uses absolute paths**: `/Users/user/Catapult` instead of `~/Catapult`
+- ✅ **Manual tilde paths expanded**: `~/CustomFolder` → `/Users/user/CustomFolder`
+- ✅ **All tests pass**: 6/6 config tests passing (100% success rate)
+- ✅ **No runtime errors**: State file creation now works correctly
+
+**User Experience**:
+```bash
+# Generated config now has absolute paths
+$ cat ~/.catapult/config.yaml
+storage:
+  basedir: "/Users/user/Catapult"
+  statepath: "/Users/user/.catapult/state.json"
+
+# Manual tilde paths still work (auto-expanded)
+$ echo 'basedir: "~/MyFiles"' >> ~/.catapult/config.yaml
+# Automatically expanded to: /Users/user/MyFiles
+```
+
+**Files Modified**:
+- `internal/config/config.go` - Fixed default config generation and added tilde expansion
+- `internal/config/config_test.go` - Added `TestTildePathExpansion()` test
+
+**Issue Resolved**: Configuration system now works correctly without path expansion errors! 🎯
+
 ## Lessons
 *This section will be updated with learnings and best practices*
 

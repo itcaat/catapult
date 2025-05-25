@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -55,6 +56,10 @@ func Load() (*Config, error) {
 		cfg.Storage.StatePath = filepath.Join(home, ".catapult", "state.json")
 	}
 
+	// Expand tilde paths if they exist
+	cfg.Storage.BaseDir = expandTildePath(cfg.Storage.BaseDir, home)
+	cfg.Storage.StatePath = expandTildePath(cfg.Storage.StatePath, home)
+
 	return cfg, nil
 }
 
@@ -92,18 +97,20 @@ func EnsureUserConfig() error {
 	}
 
 	// Default config content with token field
-	defaultConfig := `github:
+	defaultConfig := fmt.Sprintf(`github:
   clientid: "Ov23liVBxOiGZXrFZNB6"
   scopes:
     - repo
   token: ""
 
 storage:
-  basedir: "~/Catapult"
-  statepath: "~/.catapult/state.json"
+  basedir: "%s"
+  statepath: "%s"
 
 repository:
-  name: "catapult-folder"`
+  name: "catapult-folder"`,
+		filepath.Join(home, "Catapult"),
+		filepath.Join(home, ".catapult", "state.json"))
 
 	// Ensure ~/.catapult/config.yaml exists
 	configDir := filepath.Join(home, ".catapult")
@@ -194,4 +201,12 @@ func MigrateFromOldConfig() error {
 	}
 
 	return nil
+}
+
+// expandTildePath expands ~ to the home directory in file paths
+func expandTildePath(path, home string) string {
+	if strings.HasPrefix(path, "~/") {
+		return filepath.Join(home, path[2:])
+	}
+	return path
 }

@@ -290,3 +290,56 @@ func TestMigrateFromOldConfigNoOldFile(t *testing.T) {
 		t.Error("Config directory was created when it shouldn't have been")
 	}
 }
+
+func TestTildePathExpansion(t *testing.T) {
+	// Create temporary directory for test
+	tempDir := t.TempDir()
+	originalHome := os.Getenv("HOME")
+	os.Setenv("HOME", tempDir)
+	defer os.Setenv("HOME", originalHome)
+
+	configDir := filepath.Join(tempDir, ".catapult")
+	configPath := filepath.Join(configDir, "config.yaml")
+
+	// Create config with tilde paths (simulating manual editing)
+	configWithTildes := `github:
+  clientid: "test-client-id"
+  scopes:
+    - repo
+  token: "test-token"
+storage:
+  basedir: "~/CustomFolder"
+  statepath: "~/.catapult/custom-state.json"
+repository:
+  name: "test-repo"`
+
+	os.MkdirAll(configDir, 0755)
+	if err := os.WriteFile(configPath, []byte(configWithTildes), 0600); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+
+	// Load config - should expand tilde paths
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	// Check that tilde paths were expanded
+	expectedBaseDir := filepath.Join(tempDir, "CustomFolder")
+	if cfg.Storage.BaseDir != expectedBaseDir {
+		t.Errorf("Expected expanded base dir %s, got %s", expectedBaseDir, cfg.Storage.BaseDir)
+	}
+
+	expectedStatePath := filepath.Join(tempDir, ".catapult", "custom-state.json")
+	if cfg.Storage.StatePath != expectedStatePath {
+		t.Errorf("Expected expanded state path %s, got %s", expectedStatePath, cfg.Storage.StatePath)
+	}
+
+	// Other fields should remain unchanged
+	if cfg.GitHub.ClientID != "test-client-id" {
+		t.Errorf("Expected client ID 'test-client-id', got %s", cfg.GitHub.ClientID)
+	}
+	if cfg.GitHub.Token != "test-token" {
+		t.Errorf("Expected token 'test-token', got %s", cfg.GitHub.Token)
+	}
+}
