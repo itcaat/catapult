@@ -19,6 +19,7 @@ with GitHub using device flow authentication.`,
 	rootCmd.AddCommand(NewSyncCmd())
 	rootCmd.AddCommand(NewStatusCmd())
 	rootCmd.AddCommand(NewServiceCmd())
+	rootCmd.AddCommand(NewOpenCmd())
 
 	return rootCmd
 }
