@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -23,6 +24,22 @@ type Config struct {
 	Repository struct {
 		Name string `yaml:"name"`
 	} `yaml:"repository"`
+	Issues IssueConfig `yaml:"issues"`
+}
+
+// IssueConfig holds configuration for GitHub issue management
+type IssueConfig struct {
+	Enabled                 bool          `yaml:"enabled"`
+	Repository              string        `yaml:"repository"`
+	AutoCreate              bool          `yaml:"auto_create"`
+	AutoResolve             bool          `yaml:"auto_resolve"`
+	IncludeFileNames        bool          `yaml:"include_file_names"`
+	IncludeErrorDetails     bool          `yaml:"include_error_details"`
+	IncludeSystemInfo       bool          `yaml:"include_system_info"`
+	Labels                  []string      `yaml:"labels"`
+	Assignees               []string      `yaml:"assignees"`
+	MaxOpenIssues           int           `yaml:"max_open_issues"`
+	ResolutionCheckInterval time.Duration `yaml:"resolution_check_interval"`
 }
 
 // Load loads config from ~/.catapult/config.yaml
@@ -55,6 +72,9 @@ func Load() (*Config, error) {
 	if cfg.Storage.StatePath == "" {
 		cfg.Storage.StatePath = filepath.Join(home, ".catapult", "state.json")
 	}
+
+	// Set issue management defaults
+	setIssueDefaults(&cfg.Issues)
 
 	// Expand tilde paths if they exist
 	cfg.Storage.BaseDir = expandTildePath(cfg.Storage.BaseDir, home)
@@ -96,7 +116,7 @@ func EnsureUserConfig() error {
 		return fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	// Default config content with token field
+	// Default config content with token field and issues configuration
 	defaultConfig := fmt.Sprintf(`github:
   clientid: "Ov23liVBxOiGZXrFZNB6"
   scopes:
@@ -108,7 +128,22 @@ storage:
   statepath: "%s"
 
 repository:
-  name: "catapult-folder"`,
+  name: "catapult-folder"
+
+issues:
+  enabled: true
+  repository: "catapult-folder"
+  auto_create: true
+  auto_resolve: true
+  include_file_names: true
+  include_error_details: true
+  include_system_info: false
+  labels:
+    - catapult
+    - auto-generated
+  assignees: []
+  max_open_issues: 10
+  resolution_check_interval: 5m`,
 		filepath.Join(home, "Catapult"),
 		filepath.Join(home, ".catapult", "state.json"))
 
@@ -209,4 +244,35 @@ func expandTildePath(path, home string) string {
 		return filepath.Join(home, path[2:])
 	}
 	return path
+}
+
+// setIssueDefaults sets default values for issue management configuration
+func setIssueDefaults(cfg *IssueConfig) {
+	// Check if this is a completely uninitialized config (no repository set)
+	isNewConfig := cfg.Repository == ""
+
+	// Set basic defaults
+	if cfg.Repository == "" {
+		cfg.Repository = "catapult-folder"
+	}
+	if cfg.Labels == nil {
+		cfg.Labels = []string{"catapult", "auto-generated"}
+	}
+	if cfg.MaxOpenIssues == 0 {
+		cfg.MaxOpenIssues = 10
+	}
+	if cfg.ResolutionCheckInterval == 0 {
+		cfg.ResolutionCheckInterval = 5 * time.Minute
+	}
+
+	// Set defaults for boolean fields for new configs or configs missing the issues section
+	if isNewConfig {
+		// This is a new config, set enabled by default
+		cfg.Enabled = true
+		cfg.AutoCreate = true
+		cfg.AutoResolve = true
+		cfg.IncludeFileNames = true
+		cfg.IncludeErrorDetails = true
+		cfg.IncludeSystemInfo = false // Privacy-conscious default
+	}
 }

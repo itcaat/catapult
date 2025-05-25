@@ -9,6 +9,7 @@ import (
 	"github.com/google/go-github/v57/github"
 	"github.com/itcaat/catapult/internal/autosync"
 	"github.com/itcaat/catapult/internal/config"
+	"github.com/itcaat/catapult/internal/issues"
 	"github.com/itcaat/catapult/internal/repository"
 	"github.com/itcaat/catapult/internal/storage"
 	"github.com/itcaat/catapult/internal/sync"
@@ -60,8 +61,25 @@ func NewSyncCmd() *cobra.Command {
 			// Create repository instance
 			repo := repository.New(client, user.GetLogin(), cfg.Repository.Name)
 
-			// Create sync instance
-			syncer := sync.New(repo, fileManager)
+			// Create sync instance with issue management if enabled
+			var syncer *sync.Syncer
+			if cfg.Issues.Enabled {
+				// Create logger for issue management
+				logger := log.New(os.Stdout, "[ISSUES] ", log.LstdFlags)
+
+				// Create issue manager
+				issueManager, err := issues.NewManager(client, user.GetLogin(), &cfg.Issues, logger)
+				if err != nil {
+					fmt.Printf("⚠️  Warning: Failed to initialize issue management: %v\n", err)
+					fmt.Println("💡 Continuing without automatic issue creation")
+					syncer = sync.New(repo, fileManager)
+				} else {
+					syncer = sync.NewWithIssueManager(repo, fileManager, issueManager, logger)
+					fmt.Println("🎯 Issue management enabled - sync problems will create GitHub issues")
+				}
+			} else {
+				syncer = sync.New(repo, fileManager)
+			}
 
 			// If watch mode is enabled, start auto-sync
 			if watchMode {

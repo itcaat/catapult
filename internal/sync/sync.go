@@ -4,9 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
+	"github.com/itcaat/catapult/internal/issues"
 	"github.com/itcaat/catapult/internal/repository"
 	"github.com/itcaat/catapult/internal/storage"
 )
@@ -31,8 +35,10 @@ type SyncResult struct {
 
 // Syncer handles file synchronization between local storage and GitHub
 type Syncer struct {
-	repo        repository.Repository
-	fileManager *storage.FileManager
+	repo         repository.Repository
+	fileManager  *storage.FileManager
+	issueManager issues.IssueManager
+	logger       *log.Logger
 }
 
 // New creates a new Syncer instance
@@ -40,6 +46,16 @@ func New(repo repository.Repository, fileManager *storage.FileManager) *Syncer {
 	return &Syncer{
 		repo:        repo,
 		fileManager: fileManager,
+	}
+}
+
+// NewWithIssueManager creates a new Syncer instance with issue management
+func NewWithIssueManager(repo repository.Repository, fileManager *storage.FileManager, issueManager issues.IssueManager, logger *log.Logger) *Syncer {
+	return &Syncer{
+		repo:         repo,
+		fileManager:  fileManager,
+		issueManager: issueManager,
+		logger:       logger,
 	}
 }
 
@@ -265,8 +281,20 @@ func (s *Syncer) resolveConflict(ctx context.Context, file *storage.FileInfo, re
 	return nil
 }
 
-// handleSyncError provides enhanced error handling with user-friendly messages
+// handleSyncError provides enhanced error handling with user-friendly messages and creates GitHub issues
 func (s *Syncer) handleSyncError(out io.Writer, path string, err error) {
+	// Create issue if issue manager is available
+	if s.issueManager != nil {
+		if s.logger != nil {
+			s.logger.Printf("Creating issue for sync error: %s - %v", path, err)
+		}
+		s.createIssueForError(path, err)
+	} else {
+		if s.logger != nil {
+			s.logger.Printf("Issue manager not available, skipping issue creation for: %s", path)
+		}
+	}
+
 	// Check for custom repository errors that provide user-friendly messages
 	switch e := err.(type) {
 	case *repository.FileSizeError:
@@ -323,5 +351,130 @@ func (s *Syncer) handleSyncError(out io.Writer, path string, err error) {
 		fmt.Fprintf(out, "   • Verify file permissions and accessibility\n")
 		fmt.Fprintf(out, "   • Try running: catapult status\n")
 		fmt.Fprintf(out, "   • Check logs with: catapult service logs (if using service)\n\n")
+	}
+}
+
+// createIssueForError creates a GitHub issue for the sync error
+func (s *Syncer) createIssueForError(path string, err error) {
+	if s.logger != nil {
+		s.logger.Printf("Starting issue creation for error: %v", err)
+	}
+
+	// Categorize the error
+	category := s.categorizeError(err)
+	if s.logger != nil {
+		s.logger.Printf("Categorized error as: %v", category)
+	}
+
+	// Create issue
+	issue := &issues.Issue{
+		Category:    category,
+		Title:       s.generateIssueTitle(path, err),
+		Description: s.generateIssueDescription(path, err),
+		Files:       []string{filepath.Base(path)},
+		Error:       err,
+		ErrorMsg:    err.Error(),
+		Timestamp:   time.Now(),
+		Metadata: map[string]interface{}{
+			"file_path":  path,
+			"error_type": fmt.Sprintf("%T", err),
+		},
+	}
+
+	if s.logger != nil {
+		s.logger.Printf("Created issue object: %s", issue.Title)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if s.logger != nil {
+		s.logger.Printf("Calling issue manager CreateIssue...")
+	}
+
+	githubIssue, createErr := s.issueManager.CreateIssue(ctx, issue)
+	if createErr != nil {
+		if s.logger != nil {
+			s.logger.Printf("Failed to create issue for sync error: %v", createErr)
+		}
+		return
+	}
+
+	if s.logger != nil && githubIssue != nil {
+		s.logger.Printf("Successfully created issue #%d for sync error: %s", githubIssue.Number, githubIssue.Title)
+	} else if s.logger != nil {
+		s.logger.Printf("Issue creation returned nil issue")
+	}
+}
+
+// categorizeError determines the issue category based on the error type
+func (s *Syncer) categorizeError(err error) issues.IssueCategory {
+	switch err.(type) {
+	case *repository.FileSizeError:
+		return issues.CategoryQuota
+	case *repository.GitHubPermissionError:
+		return issues.CategoryPermission
+	case *repository.GitHubValidationError:
+		return issues.CategoryCorruption
+	case *repository.GitHubRepositoryError:
+		return issues.CategoryAuth
+	case *repository.GitHubAPIError:
+		return issues.CategoryNetwork
+	default:
+		// Check error message for common patterns
+		errMsg := strings.ToLower(err.Error())
+		if strings.Contains(errMsg, "permission") || strings.Contains(errMsg, "access") {
+			return issues.CategoryPermission
+		}
+		if strings.Contains(errMsg, "network") || strings.Contains(errMsg, "connection") || strings.Contains(errMsg, "timeout") {
+			return issues.CategoryNetwork
+		}
+		if strings.Contains(errMsg, "conflict") {
+			return issues.CategoryConflict
+		}
+		if strings.Contains(errMsg, "auth") || strings.Contains(errMsg, "token") {
+			return issues.CategoryAuth
+		}
+		return issues.CategoryUnknown
+	}
+}
+
+// generateIssueTitle creates a descriptive title for the issue
+func (s *Syncer) generateIssueTitle(path string, err error) string {
+	fileName := filepath.Base(path)
+
+	switch err.(type) {
+	case *repository.FileSizeError:
+		return fmt.Sprintf("File too large: %s", fileName)
+	case *repository.GitHubPermissionError:
+		return fmt.Sprintf("Permission denied: %s", fileName)
+	case *repository.GitHubValidationError:
+		return fmt.Sprintf("File validation failed: %s", fileName)
+	case *repository.GitHubRepositoryError:
+		return fmt.Sprintf("Repository access error: %s", fileName)
+	case *repository.GitHubAPIError:
+		return fmt.Sprintf("GitHub API error: %s", fileName)
+	default:
+		return fmt.Sprintf("Sync error: %s", fileName)
+	}
+}
+
+// generateIssueDescription creates a detailed description for the issue
+func (s *Syncer) generateIssueDescription(path string, err error) string {
+	fileName := filepath.Base(path)
+
+	switch e := err.(type) {
+	case *repository.FileSizeError:
+		return fmt.Sprintf("The file '%s' is too large to sync (%d bytes, limit: %d bytes). This file exceeds GitHub's file size limits and cannot be uploaded directly.", fileName, e.FileSize, e.Limit)
+	case *repository.GitHubPermissionError:
+		return fmt.Sprintf("Permission denied when trying to sync '%s'. This may be due to insufficient repository permissions or an invalid GitHub token.", fileName)
+	case *repository.GitHubValidationError:
+		return fmt.Sprintf("GitHub rejected the file '%s' due to validation errors. The file may contain invalid characters, be corrupted, or violate GitHub's content policies.", fileName)
+	case *repository.GitHubRepositoryError:
+		return fmt.Sprintf("Unable to access the repository when syncing '%s'. The repository may not exist, be private, or you may lack access permissions.", fileName)
+	case *repository.GitHubAPIError:
+		return fmt.Sprintf("GitHub API error occurred while syncing '%s' (HTTP %d). This may be due to rate limiting, server issues, or network problems.", fileName, e.StatusCode)
+	default:
+		return fmt.Sprintf("An unexpected error occurred while syncing '%s'. The sync operation failed and may require manual intervention.", fileName)
 	}
 }
