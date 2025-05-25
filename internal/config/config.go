@@ -8,117 +8,79 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// StaticConfig holds the static (base) configuration
-// Only fields that do not change at runtime
-// (clientid, scopes, repo name)
-type StaticConfig struct {
+// Config holds all configuration in a single structure
+type Config struct {
 	GitHub struct {
 		ClientID string   `yaml:"clientid"`
 		Scopes   []string `yaml:"scopes"`
-	} `yaml:"github"`
-	Repository struct {
-		Name string `yaml:"name"`
-	} `yaml:"repository"`
-}
-
-// RuntimeConfig holds dynamic fields (token, paths)
-type RuntimeConfig struct {
-	GitHub struct {
-		Token string `yaml:"token"`
+		Token    string   `yaml:"token"`
 	} `yaml:"github"`
 	Storage struct {
 		BaseDir   string `yaml:"basedir"`
 		StatePath string `yaml:"statepath"`
 	} `yaml:"storage"`
-}
-
-// Config is the merged config for use in the app
-// (not saved directly)
-type Config struct {
-	GitHub struct {
-		ClientID string
-		Scopes   []string
-		Token    string
-	}
-	Storage struct {
-		BaseDir   string
-		StatePath string
-	}
 	Repository struct {
-		Name string
-	}
+		Name string `yaml:"name"`
+	} `yaml:"repository"`
 }
 
-// Load loads config from ~/.catapult/config.yaml (static) and ~/.catapult/config.runtime.yaml (dynamic), merges them
+// Load loads config from ~/.catapult/config.yaml
 func Load() (*Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	// 1. Load static config from ~/.catapult/config.yaml
-	staticCfg := &StaticConfig{}
-	staticPath := filepath.Join(home, ".catapult", "config.yaml")
-	if data, err := os.ReadFile(staticPath); err == nil {
-		yaml.Unmarshal(data, staticCfg)
-	}
-	// Defaults if not set
-	if staticCfg.GitHub.Scopes == nil || len(staticCfg.GitHub.Scopes) == 0 {
-		staticCfg.GitHub.Scopes = []string{"repo"}
-	}
-	if staticCfg.Repository.Name == "" {
-		staticCfg.Repository.Name = "catapult-folder"
-	}
-
-	// 2. Load runtime config from home dir
-	runtimeCfg := &RuntimeConfig{}
-	runtimePath := filepath.Join(home, ".catapult", "config.runtime.yaml")
-	if data, err := os.ReadFile(runtimePath); err == nil {
-		yaml.Unmarshal(data, runtimeCfg)
-	}
-	// Set runtime defaults if not set
-	if runtimeCfg.Storage.BaseDir == "" {
-		runtimeCfg.Storage.BaseDir = filepath.Join(home, ".catapult", "files")
-	}
-	if runtimeCfg.Storage.StatePath == "" {
-		runtimeCfg.Storage.StatePath = filepath.Join(home, ".catapult", "state.json")
-	}
-
-	// 3. Merge
 	cfg := &Config{}
-	cfg.GitHub.ClientID = staticCfg.GitHub.ClientID
-	cfg.GitHub.Scopes = staticCfg.GitHub.Scopes
-	cfg.GitHub.Token = runtimeCfg.GitHub.Token
-	cfg.Repository.Name = staticCfg.Repository.Name
-	cfg.Storage.BaseDir = runtimeCfg.Storage.BaseDir
-	cfg.Storage.StatePath = runtimeCfg.Storage.StatePath
+	configPath := filepath.Join(home, ".catapult", "config.yaml")
+
+	// Try to load existing config
+	if data, err := os.ReadFile(configPath); err == nil {
+		if err := yaml.Unmarshal(data, cfg); err != nil {
+			return nil, fmt.Errorf("failed to parse config file: %w", err)
+		}
+	}
+
+	// Set defaults if not set
+	if cfg.GitHub.Scopes == nil || len(cfg.GitHub.Scopes) == 0 {
+		cfg.GitHub.Scopes = []string{"repo"}
+	}
+	if cfg.Repository.Name == "" {
+		cfg.Repository.Name = "catapult-folder"
+	}
+	if cfg.Storage.BaseDir == "" {
+		cfg.Storage.BaseDir = filepath.Join(home, ".catapult", "files")
+	}
+	if cfg.Storage.StatePath == "" {
+		cfg.Storage.StatePath = filepath.Join(home, ".catapult", "state.json")
+	}
 
 	return cfg, nil
 }
 
-// Save saves only the runtime config (token, paths) to ~/.catapult/config.runtime.yaml
+// Save saves the complete config to ~/.catapult/config.yaml with secure permissions
 func (c *Config) Save() error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("failed to get home directory: %w", err)
 	}
+
 	configDir := filepath.Join(home, ".catapult")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
-	runtimeCfg := &RuntimeConfig{}
-	runtimeCfg.GitHub.Token = c.GitHub.Token
-	runtimeCfg.Storage.BaseDir = c.Storage.BaseDir
-	runtimeCfg.Storage.StatePath = c.Storage.StatePath
 
-	data, err := yaml.Marshal(runtimeCfg)
+	data, err := yaml.Marshal(c)
 	if err != nil {
-		return fmt.Errorf("failed to marshal runtime config: %w", err)
+		return fmt.Errorf("failed to marshal config: %w", err)
 	}
-	runtimePath := filepath.Join(configDir, "config.runtime.yaml")
-	if err := os.WriteFile(runtimePath, data, 0644); err != nil {
-		return fmt.Errorf("failed to write runtime config: %w", err)
+
+	configPath := filepath.Join(configDir, "config.yaml")
+	// Use 0600 permissions to protect the token
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write config: %w", err)
 	}
+
 	return nil
 }
 
@@ -129,11 +91,12 @@ func EnsureUserConfig() error {
 		return fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	// Default config content
+	// Default config content with token field
 	defaultConfig := `github:
   clientid: "Ov23liVBxOiGZXrFZNB6"
   scopes:
     - repo
+  token: ""
 
 storage:
   basedir: "~/Catapult"
@@ -160,11 +123,75 @@ repository:
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// Write the default config file
-	if err := os.WriteFile(configPath, []byte(defaultConfig), 0644); err != nil {
+	// Write the default config file with secure permissions (0600 to protect token)
+	if err := os.WriteFile(configPath, []byte(defaultConfig), 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
 	fmt.Printf("Generated default config file: %s\n", configPath)
+	return nil
+}
+
+// MigrateFromOldConfig migrates from the old two-file system to the new single-file system
+func MigrateFromOldConfig() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	configDir := filepath.Join(home, ".catapult")
+	runtimePath := filepath.Join(configDir, "config.runtime.yaml")
+
+	// Check if old runtime config exists
+	if _, err := os.Stat(runtimePath); os.IsNotExist(err) {
+		// No old config to migrate
+		return nil
+	}
+
+	// Load current config
+	cfg, err := Load()
+	if err != nil {
+		return fmt.Errorf("failed to load current config: %w", err)
+	}
+
+	// Read old runtime config
+	type OldRuntimeConfig struct {
+		GitHub struct {
+			Token string `yaml:"token"`
+		} `yaml:"github"`
+		Storage struct {
+			BaseDir   string `yaml:"basedir"`
+			StatePath string `yaml:"statepath"`
+		} `yaml:"storage"`
+	}
+
+	oldRuntimeCfg := &OldRuntimeConfig{}
+	if data, err := os.ReadFile(runtimePath); err == nil {
+		if err := yaml.Unmarshal(data, oldRuntimeCfg); err == nil {
+			// Migrate token and storage settings if they exist
+			if oldRuntimeCfg.GitHub.Token != "" {
+				cfg.GitHub.Token = oldRuntimeCfg.GitHub.Token
+			}
+			if oldRuntimeCfg.Storage.BaseDir != "" {
+				cfg.Storage.BaseDir = oldRuntimeCfg.Storage.BaseDir
+			}
+			if oldRuntimeCfg.Storage.StatePath != "" {
+				cfg.Storage.StatePath = oldRuntimeCfg.Storage.StatePath
+			}
+
+			// Save migrated config
+			if err := cfg.Save(); err != nil {
+				return fmt.Errorf("failed to save migrated config: %w", err)
+			}
+
+			// Remove old runtime config file
+			if err := os.Remove(runtimePath); err != nil {
+				fmt.Printf("Warning: failed to remove old config file %s: %v\n", runtimePath, err)
+			} else {
+				fmt.Printf("Migrated configuration from old format and removed %s\n", runtimePath)
+			}
+		}
+	}
+
 	return nil
 }

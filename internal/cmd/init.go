@@ -25,6 +25,11 @@ func NewInitCmd() *cobra.Command {
 				return fmt.Errorf("failed to ensure user config: %w", err)
 			}
 
+			// Migrate from old two-file config system if needed
+			if err := config.MigrateFromOldConfig(); err != nil {
+				return fmt.Errorf("failed to migrate old config: %w", err)
+			}
+
 			// Load configuration
 			cfg, err := config.Load()
 			if err != nil {
