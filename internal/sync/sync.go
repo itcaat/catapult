@@ -126,8 +126,24 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 			deleted++
 		}
 		if result.Error != nil {
+			// Record the sync error in FileInfo for status display
+			if err := s.fileManager.RecordSyncError(result.Path, result.Error); err != nil {
+				// Log error but continue
+				if s.logger != nil {
+					s.logger.Printf("Failed to record sync error for %s: %v", result.Path, err)
+				}
+			}
+
 			// Enhanced error handling with user-friendly messages
 			s.handleSyncError(out, result.Path, result.Error)
+		} else {
+			// Clear any previous sync errors on successful sync
+			if err := s.fileManager.ClearSyncError(result.Path); err != nil {
+				// Log error but continue
+				if s.logger != nil {
+					s.logger.Printf("Failed to clear sync error for %s: %v", result.Path, err)
+				}
+			}
 		}
 	}
 

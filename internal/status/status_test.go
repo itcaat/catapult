@@ -124,14 +124,17 @@ func TestPrintStatus(t *testing.T) {
 		// Verify local-only file
 		assert.Contains(t, output, "local1.txt")
 		assert.Contains(t, output, "Local-only")
+		assert.Contains(t, output, "📁") // Local-only emoji
 
 		// Verify file that exists in both places
 		assert.Contains(t, output, "both.txt")
 		assert.Contains(t, output, "Not synced") // Since LastSyncedRemoteSHA is empty
+		assert.Contains(t, output, "⚠️")         // Needs sync emoji
 
 		// Verify remote-only files
 		assert.Contains(t, output, "remote1.txt")
 		assert.Contains(t, output, "Remote-only")
+		assert.Contains(t, output, "⚠️") // Needs sync emoji
 		assert.Contains(t, output, "remote2.txt")
 		assert.Contains(t, output, "Remote-only")
 
@@ -305,5 +308,83 @@ func TestDetermineFileStatus(t *testing.T) {
 		}
 		status := determineFileStatus(file, remoteFile)
 		assert.Equal(t, "Conflict", status)
+	})
+}
+
+func TestGetStatusEmoji(t *testing.T) {
+	tests := []struct {
+		status   string
+		expected string
+	}{
+		{"Sync Error (Network)", "🚨"},
+		{"Sync Error (Permission)", "🚨"},
+		{"Sync Error (Validation)", "🚨"},
+		{"Sync Error (Unknown)", "🚨"},
+		{"Synced", "✅"},
+		{"Modified locally", "⚠️"},
+		{"Modified in repository", "⚠️"},
+		{"Not synced", "⚠️"},
+		{"Remote-only", "⚠️"},
+		{"Deleted locally (needs remote deletion)", "⚠️"},
+		{"Conflict", "❌"},
+		{"Deleted locally", "🗑️"},
+		{"Local-only", "📁"},
+		{"Unknown status", "❓"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.status, func(t *testing.T) {
+			emoji := getStatusEmoji(test.status)
+			assert.Equal(t, test.expected, emoji)
+		})
+	}
+}
+
+func TestFormatSyncError(t *testing.T) {
+	tests := []struct {
+		errorMsg string
+		expected string
+	}{
+		{"network timeout occurred", "Sync Error (Network)"},
+		{"connection refused", "Sync Error (Network)"},
+		{"permission denied", "Sync Error (Permission)"},
+		{"forbidden access", "Sync Error (Permission)"},
+		{"unauthorized request", "Sync Error (Permission)"},
+		{"validation failed", "Sync Error (Validation)"},
+		{"invalid characters", "Sync Error (Validation)"},
+		{"file corrupted", "Sync Error (Validation)"},
+		{"rate limit exceeded", "Sync Error (Rate Limit)"},
+		{"quota exceeded", "Sync Error (Rate Limit)"},
+		{"authentication failed", "Sync Error (Auth)"},
+		{"invalid token", "Sync Error (Auth)"},
+		{"file not found", "Sync Error (Not Found)"},
+		{"404 error", "Sync Error (Not Found)"},
+		{"some random error", "Sync Error (Unknown)"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.errorMsg, func(t *testing.T) {
+			result := formatSyncError(test.errorMsg)
+			assert.Equal(t, test.expected, result)
+		})
+	}
+}
+
+func TestDetermineFileStatusWithSyncError(t *testing.T) {
+	t.Run("SyncErrorTakesPriority", func(t *testing.T) {
+		file := &storage.FileInfo{
+			Path:             "/test/file.txt",
+			Hash:             "localhash123",
+			LastSyncErrorMsg: "network timeout occurred",
+			Deleted:          true, // Even if deleted, error takes priority
+		}
+		remoteFile := &repository.RemoteFileInfo{
+			Path:    "file.txt",
+			Content: "remote content",
+			SHA:     "remotesha123",
+			Size:    14,
+		}
+		status := determineFileStatus(file, remoteFile)
+		assert.Equal(t, "Sync Error (Network)", status)
 	})
 }

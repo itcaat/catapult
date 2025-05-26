@@ -21,6 +21,11 @@ type FileInfo struct {
 	LastSyncedHash      string    `json:"last_synced_hash"`
 	LastSyncedRemoteSHA string    `json:"last_synced_remote_sha"`
 	Deleted             bool      `json:"deleted,omitempty"` // Track if file was deleted locally
+
+	// Error tracking fields
+	LastSyncErrorMsg string    `json:"last_sync_error,omitempty"`
+	LastSyncAttempt  time.Time `json:"last_sync_attempt,omitempty"`
+	SyncRetryCount   int       `json:"sync_retry_count,omitempty"`
 }
 
 // SyncStatus represents the synchronization status of a file
@@ -413,4 +418,42 @@ func copyFile(src, dst string) error {
 // RemoveFile removes a file from tracking
 func (fm *FileManager) RemoveFile(path string) {
 	delete(fm.files, path)
+}
+
+// RecordSyncError records a sync error for a file
+func (fm *FileManager) RecordSyncError(path string, err error) error {
+	fileInfo, exists := fm.files[path]
+	if !exists {
+		return fmt.Errorf("file not tracked: %s", path)
+	}
+
+	fileInfo.LastSyncErrorMsg = err.Error()
+	fileInfo.LastSyncAttempt = time.Now()
+	fileInfo.SyncRetryCount++
+
+	return nil
+}
+
+// ClearSyncError clears the sync error for a file (called on successful sync)
+func (fm *FileManager) ClearSyncError(path string) error {
+	fileInfo, exists := fm.files[path]
+	if !exists {
+		return fmt.Errorf("file not tracked: %s", path)
+	}
+
+	fileInfo.LastSyncErrorMsg = ""
+	fileInfo.LastSyncAttempt = time.Time{}
+	fileInfo.SyncRetryCount = 0
+
+	return nil
+}
+
+// HasSyncError checks if a file has a sync error
+func (fm *FileManager) HasSyncError(path string) bool {
+	fileInfo, exists := fm.files[path]
+	if !exists {
+		return false
+	}
+
+	return fileInfo.LastSyncErrorMsg != ""
 }
