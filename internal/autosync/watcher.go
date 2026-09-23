@@ -3,12 +3,12 @@ package autosync
 import (
 	"context"
 	"fmt"
-	"log"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/itcaat/catapult/internal/logging"
 )
 
 // WatchConfig holds configuration for file watching
@@ -42,11 +42,11 @@ type Watcher struct {
 	fsWatcher *fsnotify.Watcher
 	debouncer *Debouncer
 	config    *WatchConfig
-	logger    *log.Logger
+	logger    *logging.Logger
 }
 
 // NewWatcher creates a new file watcher
-func NewWatcher(config *WatchConfig, logger *log.Logger) (*Watcher, error) {
+func NewWatcher(config *WatchConfig, logger *logging.Logger) (*Watcher, error) {
 	if config == nil {
 		config = DefaultWatchConfig()
 	}
@@ -73,7 +73,7 @@ func (w *Watcher) Watch(ctx context.Context, directory string, callback func(Fil
 		return fmt.Errorf("failed to add directory to watcher: %w", err)
 	}
 
-	w.logger.Printf("Started watching directory: %s", directory)
+	w.logger.Infof("Started watching directory: %s", directory)
 
 	for {
 		select {
@@ -82,7 +82,7 @@ func (w *Watcher) Watch(ctx context.Context, directory string, callback func(Fil
 				continue
 			}
 
-			w.logger.Printf("File event: %s %s", event.Op, event.Name)
+			w.logger.Debugf("File event: %s %s", event.Op, event.Name)
 
 			// Use debouncer to group rapid changes
 			w.debouncer.Add(event.Name, func() {
@@ -95,11 +95,11 @@ func (w *Watcher) Watch(ctx context.Context, directory string, callback func(Fil
 			})
 
 		case err := <-w.fsWatcher.Errors:
-			w.logger.Printf("Watcher error: %v", err)
+			w.logger.Errorf("Watcher error: %v", err)
 			// Continue watching on errors
 
 		case <-ctx.Done():
-			w.logger.Printf("Stopping file watcher")
+			w.logger.Infof("Stopping file watcher")
 			return w.Close()
 		}
 	}

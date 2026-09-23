@@ -3,7 +3,6 @@ package issues
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/google/go-github/v57/github"
 	"github.com/itcaat/catapult/internal/config"
+	"github.com/itcaat/catapult/internal/logging"
 )
 
 // Manager implements the IssueManager interface
@@ -21,11 +21,11 @@ type Manager struct {
 	tracker   *Tracker
 	templates *Templates
 	config    *config.IssueConfig
-	logger    *log.Logger
+	logger    *logging.Logger
 }
 
 // NewManager creates a new issue manager instance
-func NewManager(client *github.Client, owner string, cfg *config.IssueConfig, logger *log.Logger) (*Manager, error) {
+func NewManager(client *github.Client, owner string, cfg *config.IssueConfig, logger *logging.Logger) (*Manager, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("issue config cannot be nil")
 	}
@@ -41,7 +41,7 @@ func NewManager(client *github.Client, owner string, cfg *config.IssueConfig, lo
 
 	// Load existing tracked issues
 	if err := tracker.Load(); err != nil {
-		logger.Printf("Warning: failed to load issue tracker: %v", err)
+		logger.Warnf("Warning: failed to load issue tracker: %v", err)
 	}
 
 	manager := &Manager{
@@ -71,21 +71,21 @@ func (m *Manager) CreateIssue(ctx context.Context, issue *Issue) (*GitHubIssue, 
 	// Generate the final templated title to search for
 	content, templateErr := m.templates.Generate(issue)
 	if templateErr != nil {
-		m.logger.Printf("Warning: failed to generate template for title comparison: %v", templateErr)
+		m.logger.Warnf("Warning: failed to generate template for title comparison: %v", templateErr)
 		// Fallback to original title
 		content = &IssueContent{Title: issue.Title}
 	}
 
 	// Check for existing issues with the same final title
-	m.logger.Printf("Checking for existing issues with same title...")
+	m.logger.Infof("Checking for existing issues with same title...")
 	existing, err := m.findIssueByTitle(ctx, content.Title)
 	if err != nil {
-		m.logger.Printf("Warning: failed to check for existing issues: %v", err)
+		m.logger.Warnf("Warning: failed to check for existing issues: %v", err)
 	}
-	m.logger.Printf("Title check completed, existing: %v", existing != nil)
+	m.logger.Infof("Title check completed, existing: %v", existing != nil)
 
 	if existing != nil {
-		m.logger.Printf("Found existing issue with same title, adding comment instead of creating new")
+		m.logger.Infof("Found existing issue with same title, adding comment instead of creating new")
 		// Add comment to existing issue instead of creating new one
 		return m.addCommentToIssue(ctx, existing, issue)
 	}
@@ -114,10 +114,10 @@ func (m *Manager) CreateIssue(ctx context.Context, issue *Issue) (*GitHubIssue, 
 
 	// Track locally
 	if err := m.tracker.Track(issue, githubIssue); err != nil {
-		m.logger.Printf("Warning: failed to track issue locally: %v", err)
+		m.logger.Warnf("Warning: failed to track issue locally: %v", err)
 	}
 
-	m.logger.Printf("Created issue #%d: %s", githubIssue.Number, githubIssue.Title)
+	m.logger.Infof("Created issue #%d: %s", githubIssue.Number, githubIssue.Title)
 	return githubIssue, nil
 }
 
@@ -146,7 +146,7 @@ func (m *Manager) UpdateIssue(ctx context.Context, issueNumber int, update *Issu
 		return fmt.Errorf("failed to update issue #%d: %w", issueNumber, err)
 	}
 
-	m.logger.Printf("Updated issue #%d", issueNumber)
+	m.logger.Infof("Updated issue #%d", issueNumber)
 	return nil
 }
 
@@ -193,13 +193,13 @@ func (m *Manager) ResolveIssue(ctx context.Context, issueNumber int, resolution 
 	for _, tracked := range m.tracker.GetAllOpen() {
 		if tracked.GitHubIssue.Number == issueNumber {
 			if err := m.tracker.Update(tracked.LocalIssue.ID, githubIssue, StatusResolved); err != nil {
-				m.logger.Printf("Warning: failed to update local tracking: %v", err)
+				m.logger.Warnf("Warning: failed to update local tracking: %v", err)
 			}
 			break
 		}
 	}
 
-	m.logger.Printf("Resolved issue #%d: %s", issueNumber, issue.GetTitle())
+	m.logger.Infof("Resolved issue #%d: %s", issueNumber, issue.GetTitle())
 	return nil
 }
 
@@ -264,24 +264,24 @@ func (m *Manager) CheckResolution(ctx context.Context, issue *Issue) (bool, erro
 
 // FindSimilarIssue looks for existing issues that are similar to the given issue
 func (m *Manager) FindSimilarIssue(ctx context.Context, issue *Issue) (*GitHubIssue, error) {
-	m.logger.Printf("FindSimilarIssue: Starting search for similar issues")
+	m.logger.Debugf("FindSimilarIssue: Starting search for similar issues")
 
 	// First check local tracker
-	m.logger.Printf("FindSimilarIssue: Checking local tracker")
+	m.logger.Debugf("FindSimilarIssue: Checking local tracker")
 	tracked, err := m.tracker.FindSimilar(issue)
 	if err != nil {
-		m.logger.Printf("FindSimilarIssue: Error in local tracker: %v", err)
+		m.logger.Warnf("FindSimilarIssue: Error in local tracker: %v", err)
 		return nil, err
 	}
-	m.logger.Printf("FindSimilarIssue: Local tracker check completed, found: %v", tracked != nil)
+	m.logger.Debugf("FindSimilarIssue: Local tracker check completed, found: %v", tracked != nil)
 
 	if tracked != nil && tracked.Status != StatusClosed {
-		m.logger.Printf("FindSimilarIssue: Returning local tracked issue")
+		m.logger.Debugf("FindSimilarIssue: Returning local tracked issue")
 		return tracked.GitHubIssue, nil
 	}
 
 	// Skip GitHub search for now to avoid hanging - rely on local tracker only
-	m.logger.Printf("FindSimilarIssue: Skipping GitHub search (using local tracker only)")
+	m.logger.Debugf("FindSimilarIssue: Skipping GitHub search (using local tracker only)")
 	return nil, nil
 }
 
@@ -346,7 +346,7 @@ func (m *Manager) updateExistingIssue(ctx context.Context, existing *GitHubIssue
 	updatedIssue.UpdatedAt = time.Now()
 
 	if err := m.tracker.Update(newIssue.ID, &updatedIssue, StatusUpdated); err != nil {
-		m.logger.Printf("Warning: failed to update local tracking: %v", err)
+		m.logger.Warnf("Warning: failed to update local tracking: %v", err)
 	}
 
 	return &updatedIssue, nil
@@ -356,7 +356,7 @@ func (m *Manager) updateExistingIssue(ctx context.Context, existing *GitHubIssue
 func (m *Manager) searchGitHubForSimilar(ctx context.Context, issue *Issue) (*GitHubIssue, error) {
 	// Search for issues with catapult label (more reliable than category-specific labels)
 	query := fmt.Sprintf("repo:%s/%s is:open label:catapult", m.owner, m.repo)
-	m.logger.Printf("searchGitHubForSimilar: Executing search query: %s", query)
+	m.logger.Infof("searchGitHubForSimilar: Executing search query: %s", query)
 
 	opts := &github.SearchOptions{
 		ListOptions: github.ListOptions{
@@ -364,9 +364,9 @@ func (m *Manager) searchGitHubForSimilar(ctx context.Context, issue *Issue) (*Gi
 		},
 	}
 
-	m.logger.Printf("searchGitHubForSimilar: Calling GitHub Search API...")
+	m.logger.Infof("searchGitHubForSimilar: Calling GitHub Search API...")
 	result, _, err := m.client.Search.Issues(ctx, query, opts)
-	m.logger.Printf("searchGitHubForSimilar: GitHub Search API returned, error: %v", err)
+	m.logger.Infof("searchGitHubForSimilar: GitHub Search API returned, error: %v", err)
 	if err != nil {
 		return nil, err
 	}
@@ -420,31 +420,31 @@ func getLabelsFromIssue(issue *github.Issue) []string {
 
 // findIssueByTitle looks for an existing issue with the exact same title (open or closed)
 func (m *Manager) findIssueByTitle(ctx context.Context, title string) (*GitHubIssue, error) {
-	m.logger.Printf("findIssueByTitle: Searching for issue with title: %s", title)
+	m.logger.Infof("findIssueByTitle: Searching for issue with title: %s", title)
 
 	// First check local tracker for issues with matching titles (including closed ones)
 	allTracked := m.tracker.GetAll()
 	for _, tracked := range allTracked {
 		if tracked.GitHubIssue.Title == title {
-			m.logger.Printf("findIssueByTitle: Found matching issue in local tracker #%d (status: %s)", tracked.GitHubIssue.Number, tracked.Status)
+			m.logger.Infof("findIssueByTitle: Found matching issue in local tracker #%d (status: %s)", tracked.GitHubIssue.Number, tracked.Status)
 			return tracked.GitHubIssue, nil
 		}
 	}
 
 	// If not found in local tracker, skip GitHub API call to avoid hanging
 	// This means we might miss some issues, but it's better than hanging
-	m.logger.Printf("findIssueByTitle: No matching issue found in local tracker, skipping GitHub API call")
+	m.logger.Infof("findIssueByTitle: No matching issue found in local tracker, skipping GitHub API call")
 	return nil, nil
 }
 
 // addCommentToIssue adds a comment to an existing issue and reopens it if closed
 func (m *Manager) addCommentToIssue(ctx context.Context, existing *GitHubIssue, newIssue *Issue) (*GitHubIssue, error) {
-	m.logger.Printf("addCommentToIssue: Adding comment to issue #%d (current state: %s)", existing.Number, existing.State)
+	m.logger.Infof("addCommentToIssue: Adding comment to issue #%d (current state: %s)", existing.Number, existing.State)
 
 	// Check if issue is closed and reopen it
 	wasClosedBefore := existing.State == "closed"
 	if wasClosedBefore {
-		m.logger.Printf("addCommentToIssue: Issue #%d is closed, reopening it", existing.Number)
+		m.logger.Infof("addCommentToIssue: Issue #%d is closed, reopening it", existing.Number)
 
 		state := "open"
 		update := &IssueUpdate{
@@ -457,7 +457,7 @@ func (m *Manager) addCommentToIssue(ctx context.Context, existing *GitHubIssue, 
 
 		// Update the existing issue state
 		existing.State = "open"
-		m.logger.Printf("addCommentToIssue: Successfully reopened issue #%d", existing.Number)
+		m.logger.Infof("addCommentToIssue: Successfully reopened issue #%d", existing.Number)
 	}
 
 	// Generate comment content
@@ -502,10 +502,10 @@ func (m *Manager) addCommentToIssue(ctx context.Context, existing *GitHubIssue, 
 	}
 
 	if err := m.tracker.Update(newIssue.ID, existing, newStatus); err != nil {
-		m.logger.Printf("Warning: failed to update local tracking: %v", err)
+		m.logger.Warnf("Warning: failed to update local tracking: %v", err)
 	}
 
-	m.logger.Printf("addCommentToIssue: Successfully added comment to issue #%d", existing.Number)
+	m.logger.Infof("addCommentToIssue: Successfully added comment to issue #%d", existing.Number)
 	return existing, nil
 }
 

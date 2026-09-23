@@ -3,7 +3,9 @@ package repository
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	posixpath "path"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/go-github/v57/github"
@@ -95,6 +97,10 @@ type GitHubRepository struct {
 	client *github.Client
 	owner  string
 	name   string
+
+	defaultBranchOnce sync.Once
+	defaultBranch     string
+	defaultBranchErr  error
 }
 
 // New creates a new GitHubRepository instance
@@ -109,9 +115,10 @@ func New(client *github.Client, owner, name string) Repository {
 // EnsureExists checks if the repository exists and creates it if it doesn't
 func (r *GitHubRepository) EnsureExists(ctx context.Context) error {
 	// Check if repository exists
-	_, _, err := r.client.Repositories.Get(ctx, r.owner, r.name)
+	repo, _, err := r.client.Repositories.Get(ctx, r.owner, r.name)
 	if err == nil {
 		// Repository exists
+		r.setDefaultBranch(repo.GetDefaultBranch())
 		return nil
 	}
 
@@ -133,8 +140,9 @@ func (r *GitHubRepository) EnsureExists(ctx context.Context) error {
 
 	// Wait for repository to be ready
 	for i := 0; i < 10; i++ {
-		_, _, err := r.client.Repositories.Get(ctx, r.owner, r.name)
+		repo, _, err := r.client.Repositories.Get(ctx, r.owner, r.name)
 		if err == nil {
+			r.setDefaultBranch(repo.GetDefaultBranch())
 			return nil
 		}
 		time.Sleep(time.Second)
@@ -145,15 +153,47 @@ func (r *GitHubRepository) EnsureExists(ctx context.Context) error {
 
 // GetDefaultBranch returns the default branch of the repository
 func (r *GitHubRepository) GetDefaultBranch(ctx context.Context) (string, error) {
-	repo, _, err := r.client.Repositories.Get(ctx, r.owner, r.name)
-	if err != nil {
-		return "", fmt.Errorf("failed to get repository: %w", err)
+	r.defaultBranchOnce.Do(func() {
+		repo, _, err := r.client.Repositories.Get(ctx, r.owner, r.name)
+		if err != nil {
+			r.defaultBranchErr = fmt.Errorf("failed to get repository: %w", err)
+			return
+		}
+		r.defaultBranch = repo.GetDefaultBranch()
+	})
+	if r.defaultBranchErr != nil {
+		return "", r.defaultBranchErr
 	}
-	return repo.GetDefaultBranch(), nil
+	if r.defaultBranch == "" {
+		return "", fmt.Errorf("repository has no default branch")
+	}
+	return r.defaultBranch, nil
+}
+
+func (r *GitHubRepository) setDefaultBranch(branch string) {
+	if branch == "" {
+		return
+	}
+	r.defaultBranchOnce.Do(func() {
+		r.defaultBranch = branch
+	})
+}
+
+func (r *GitHubRepository) branch(ctx context.Context) (string, error) {
+	return r.GetDefaultBranch(ctx)
+}
+
+func normalizeRemotePath(filePath string) string {
+	filePath = strings.ReplaceAll(filePath, "\\", "/")
+	if filePath == "" {
+		return ""
+	}
+	return posixpath.Join(filePath)
 }
 
 // CreateFile creates a file in the repository
 func (r *GitHubRepository) CreateFile(ctx context.Context, path, content string) error {
+	path = normalizeRemotePath(path)
 	// Check file size before attempting upload
 	fileSize := len(content)
 	const githubFileSizeLimit = 100 * 1024 * 1024 // 100MB in bytes
@@ -166,10 +206,15 @@ func (r *GitHubRepository) CreateFile(ctx context.Context, path, content string)
 		}
 	}
 
-	_, _, err := r.client.Repositories.CreateFile(ctx, r.owner, r.name, path, &github.RepositoryContentFileOptions{
+	branch, err := r.branch(ctx)
+	if err != nil {
+		return err
+	}
+
+	_, _, err = r.client.Repositories.CreateFile(ctx, r.owner, r.name, path, &github.RepositoryContentFileOptions{
 		Message: github.String(fmt.Sprintf("Add %s", path)),
 		Content: []byte(content),
-		Branch:  github.String("main"),
+		Branch:  github.String(branch),
 	})
 	if err != nil {
 		// Check for GitHub API specific errors
@@ -220,8 +265,13 @@ func (r *GitHubRepository) CreateFile(ctx context.Context, path, content string)
 
 // GetFile gets a file from the repository
 func (r *GitHubRepository) GetFile(ctx context.Context, path string) (string, error) {
+	path = normalizeRemotePath(path)
+	branch, err := r.branch(ctx)
+	if err != nil {
+		return "", err
+	}
 	file, _, _, err := r.client.Repositories.GetContents(ctx, r.owner, r.name, path, &github.RepositoryContentGetOptions{
-		Ref: "main",
+		Ref: branch,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to get file: %w", err)
@@ -235,8 +285,13 @@ func (r *GitHubRepository) GetFile(ctx context.Context, path string) (string, er
 
 // UpdateFile updates a file in the repository
 func (r *GitHubRepository) UpdateFile(ctx context.Context, path, content string) error {
+	path = normalizeRemotePath(path)
+	branch, err := r.branch(ctx)
+	if err != nil {
+		return err
+	}
 	file, _, _, err := r.client.Repositories.GetContents(ctx, r.owner, r.name, path, &github.RepositoryContentGetOptions{
-		Ref: "main",
+		Ref: branch,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get file: %w", err)
@@ -246,7 +301,7 @@ func (r *GitHubRepository) UpdateFile(ctx context.Context, path, content string)
 		Message: github.String(fmt.Sprintf("Update %s", path)),
 		Content: []byte(content),
 		SHA:     github.String(file.GetSHA()),
-		Branch:  github.String("main"),
+		Branch:  github.String(branch),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to update file: %w", err)
@@ -256,8 +311,13 @@ func (r *GitHubRepository) UpdateFile(ctx context.Context, path, content string)
 
 // DeleteFile deletes a file from the repository
 func (r *GitHubRepository) DeleteFile(ctx context.Context, path string) error {
+	path = normalizeRemotePath(path)
+	branch, err := r.branch(ctx)
+	if err != nil {
+		return err
+	}
 	file, _, _, err := r.client.Repositories.GetContents(ctx, r.owner, r.name, path, &github.RepositoryContentGetOptions{
-		Ref: "main",
+		Ref: branch,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get file: %w", err)
@@ -266,7 +326,7 @@ func (r *GitHubRepository) DeleteFile(ctx context.Context, path string) error {
 	_, _, err = r.client.Repositories.DeleteFile(ctx, r.owner, r.name, path, &github.RepositoryContentFileOptions{
 		Message: github.String(fmt.Sprintf("Delete %s", path)),
 		SHA:     github.String(file.GetSHA()),
-		Branch:  github.String("main"),
+		Branch:  github.String(branch),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to delete file: %w", err)
@@ -276,9 +336,14 @@ func (r *GitHubRepository) DeleteFile(ctx context.Context, path string) error {
 
 // FileExists checks if a file exists in the repository
 func (r *GitHubRepository) FileExists(ctx context.Context, path string) (bool, error) {
+	path = normalizeRemotePath(path)
+	branch, err := r.branch(ctx)
+	if err != nil {
+		return false, err
+	}
 	// Get file from repository
-	_, _, _, err := r.client.Repositories.GetContents(ctx, r.owner, r.name, path, &github.RepositoryContentGetOptions{
-		Ref: "main",
+	_, _, _, err = r.client.Repositories.GetContents(ctx, r.owner, r.name, path, &github.RepositoryContentGetOptions{
+		Ref: branch,
 	})
 	if err != nil {
 		if _, ok := err.(*github.ErrorResponse); ok {
@@ -305,8 +370,12 @@ func (r *GitHubRepository) ListFiles(ctx context.Context) ([]string, error) {
 
 // listFilesRecursive recursively lists files in a directory
 func (r *GitHubRepository) listFilesRecursive(ctx context.Context, path string, files *[]string) error {
+	branch, err := r.branch(ctx)
+	if err != nil {
+		return err
+	}
 	_, directoryContent, _, err := r.client.Repositories.GetContents(ctx, r.owner, r.name, path, &github.RepositoryContentGetOptions{
-		Ref: "main",
+		Ref: branch,
 	})
 	if err != nil {
 		return err
@@ -317,13 +386,13 @@ func (r *GitHubRepository) listFilesRecursive(ctx context.Context, path string, 
 			if path == "" {
 				*files = append(*files, content.GetName())
 			} else {
-				*files = append(*files, filepath.Join(path, content.GetName()))
+				*files = append(*files, posixpath.Join(path, content.GetName()))
 			}
 		} else if content.GetType() == "dir" {
 			// Recursively get files from subdirectory
 			subPath := content.GetName()
 			if path != "" {
-				subPath = filepath.Join(path, content.GetName())
+				subPath = posixpath.Join(path, content.GetName())
 			}
 			err := r.listFilesRecursive(ctx, subPath, files)
 			if err != nil {
@@ -350,8 +419,12 @@ func (r *GitHubRepository) GetAllFilesWithContent(ctx context.Context) (map[stri
 
 // getAllFilesRecursive recursively lists files in a directory and retrieves their content
 func (r *GitHubRepository) getAllFilesRecursive(ctx context.Context, path string, files map[string]*RemoteFileInfo) error {
+	branch, err := r.branch(ctx)
+	if err != nil {
+		return err
+	}
 	_, directoryContent, _, err := r.client.Repositories.GetContents(ctx, r.owner, r.name, path, &github.RepositoryContentGetOptions{
-		Ref: "main",
+		Ref: branch,
 	})
 	if err != nil {
 		return err
@@ -361,7 +434,7 @@ func (r *GitHubRepository) getAllFilesRecursive(ctx context.Context, path string
 		if content.GetType() == "file" {
 			filePath := content.GetName()
 			if path != "" {
-				filePath = filepath.Join(path, content.GetName())
+				filePath = posixpath.Join(path, content.GetName())
 			}
 
 			// Get content if available, otherwise make a separate call
@@ -392,7 +465,7 @@ func (r *GitHubRepository) getAllFilesRecursive(ctx context.Context, path string
 			// Recursively get files from subdirectory
 			subPath := content.GetName()
 			if path != "" {
-				subPath = filepath.Join(path, content.GetName())
+				subPath = posixpath.Join(path, content.GetName())
 			}
 			err := r.getAllFilesRecursive(ctx, subPath, files)
 			if err != nil {

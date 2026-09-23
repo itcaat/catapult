@@ -3,13 +3,13 @@ package autosync
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/itcaat/catapult/internal/config"
+	"github.com/itcaat/catapult/internal/logging"
 	"github.com/itcaat/catapult/internal/network"
 	"github.com/itcaat/catapult/internal/repository"
 	"github.com/itcaat/catapult/internal/storage"
@@ -50,7 +50,7 @@ type Manager struct {
 	syncer          *catapultsync.Syncer
 	fileManager     *storage.FileManager
 	repo            repository.Repository
-	logger          *log.Logger
+	logger          *logging.Logger
 	done            chan struct{}
 	networkDetector *network.Detector
 	queue           *Queue
@@ -73,7 +73,7 @@ func NewManager(
 	syncer *catapultsync.Syncer,
 	fileManager *storage.FileManager,
 	repo repository.Repository,
-	logger *log.Logger,
+	logger *logging.Logger,
 ) (*Manager, error) {
 	autoSyncConfig := DefaultConfig()
 
@@ -95,7 +95,7 @@ func NewManager(
 
 	// Load existing queue
 	if err := queue.Load(); err != nil {
-		logger.Printf("Warning: failed to load offline queue: %v", err)
+		logger.Warnf("Warning: failed to load offline queue: %v", err)
 	}
 
 	return &Manager{
@@ -119,11 +119,11 @@ func NewManager(
 // Start begins automatic synchronization
 func (m *Manager) Start(ctx context.Context) error {
 	if !m.config.Enabled {
-		m.logger.Printf("Auto-sync is disabled")
+		m.logger.Infof("Auto-sync is disabled")
 		return nil
 	}
 
-	m.logger.Printf("Starting auto-sync manager")
+	m.logger.Infof("Starting auto-sync manager")
 
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -139,7 +139,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	if m.config.WatchLocalChanges {
 		go func() {
 			if err := m.startFileWatcher(workerCtx); err != nil {
-				m.logger.Printf("File watcher error: %v", err)
+				m.logger.Infof("File watcher error: %v", err)
 			}
 		}()
 	}
@@ -154,7 +154,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	// Start periodic queue cleanup
 	go m.startQueueCleanup(workerCtx)
 
-	m.logger.Printf("Auto-sync manager started successfully")
+	m.logger.Infof("Auto-sync manager started successfully")
 
 	// Wait for cancellation or an explicit Stop, then drain in-flight work.
 	select {
@@ -228,18 +228,18 @@ func (m *Manager) startFileWatcher(ctx context.Context) error {
 
 // onFileChange handles file change events
 func (m *Manager) onFileChange(event FileEvent) {
-	m.logger.Printf("Processing file change: %s", event.Path)
+	m.logger.Debugf("Processing file change: %s", event.Path)
 
 	// Check if file should be synced
 	relPath, err := filepath.Rel(m.appConfig.Storage.BaseDir, event.Path)
 	if err != nil {
-		m.logger.Printf("Failed to get relative path for %s: %v", event.Path, err)
+		m.logger.Errorf("Failed to get relative path for %s: %v", event.Path, err)
 		return
 	}
 
 	// Skip if file doesn't exist (might be a temporary file)
 	if _, err := os.Stat(event.Path); os.IsNotExist(err) {
-		m.logger.Printf("File no longer exists, skipping: %s", event.Path)
+		m.logger.Infof("File no longer exists, skipping: %s", event.Path)
 		return
 	}
 
@@ -256,42 +256,42 @@ func (m *Manager) syncFile(relPath string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	m.logger.Printf("Syncing file: %s", relPath)
+	m.logger.Infof("Syncing file: %s", relPath)
 
 	// Wait for network connectivity with timeout
 	connectCtx, connectCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer connectCancel()
 
 	if err := m.networkDetector.WaitForGitHubConnectivity(connectCtx); err != nil {
-		m.logger.Printf("No GitHub connectivity, queueing sync for %s", relPath)
+		m.logger.Infof("No GitHub connectivity, queueing sync for %s", relPath)
 		m.queueOperation(relPath, "sync")
 		return
 	}
 
 	// Reload file manager state to get latest file info
 	if err := m.fileManager.LoadState(m.appConfig.Storage.StatePath); err != nil {
-		m.logger.Printf("Failed to load state: %v", err)
+		m.logger.Errorf("Failed to load state: %v", err)
 		m.queueOperation(relPath, "sync")
 		return
 	}
 
 	// Scan directory to update file info
 	if err := m.fileManager.ScanDirectory(); err != nil {
-		m.logger.Printf("Failed to scan directory: %v", err)
+		m.logger.Errorf("Failed to scan directory: %v", err)
 		m.queueOperation(relPath, "sync")
 		return
 	}
 
 	// Perform sync
 	if err := m.syncer.SyncAll(ctx, os.Stdout); err != nil {
-		m.logger.Printf("Failed to sync file %s: %v", relPath, err)
+		m.logger.Errorf("Failed to sync file %s: %v", relPath, err)
 		m.queueOperation(relPath, "sync")
 		return
 	}
 
 	// Save state after sync
 	if err := m.fileManager.SaveState(m.appConfig.Storage.StatePath); err != nil {
-		m.logger.Printf("Failed to save state: %v", err)
+		m.logger.Errorf("Failed to save state: %v", err)
 	}
 
 	if m.config.NotificationLevel != "silent" {
@@ -312,7 +312,7 @@ func (m *Manager) queueOperation(filePath, operation string) {
 	}
 
 	if err := m.queue.Add(op); err != nil {
-		m.logger.Printf("Failed to queue operation for %s: %v", filePath, err)
+		m.logger.Errorf("Failed to queue operation for %s: %v", filePath, err)
 	} else {
 		if m.config.NotificationLevel == "verbose" {
 			fmt.Printf("📥 Queued for sync: %s\n", filePath)
@@ -344,19 +344,19 @@ func (m *Manager) processPendingOperations() {
 		return
 	}
 
-	m.logger.Printf("Processing %d pending operations", len(pending))
+	m.logger.Infof("Processing %d pending operations", len(pending))
 
 	for _, op := range pending {
 		// Skip operations that have exceeded retry limit
 		if op.Retries >= m.config.RetryAttempts {
-			m.logger.Printf("Operation %s exceeded retry limit, removing", op.ID)
+			m.logger.Infof("Operation %s exceeded retry limit, removing", op.ID)
 			m.queue.Remove(op.ID)
 			continue
 		}
 
 		// Try to execute operation
 		if err := m.executeQueuedOperation(op); err != nil {
-			m.logger.Printf("Failed to execute operation %s: %v", op.ID, err)
+			m.logger.Errorf("Failed to execute operation %s: %v", op.ID, err)
 			m.queue.UpdateRetry(op.ID, err)
 		} else {
 			// Success - remove from queue
@@ -434,12 +434,12 @@ func (m *Manager) checkRemoteChanges() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	m.logger.Printf("Checking for remote changes")
+	m.logger.Debugf("Checking for remote changes")
 
 	// Get remote files
 	remoteFiles, err := m.repo.GetAllFilesWithContent(ctx)
 	if err != nil {
-		m.logger.Printf("Failed to get remote files: %v", err)
+		m.logger.Errorf("Failed to get remote files: %v", err)
 		return
 	}
 
@@ -465,7 +465,7 @@ func (m *Manager) checkRemoteChanges() {
 	}
 
 	if hasChanges {
-		m.logger.Printf("Remote changes detected, syncing...")
+		m.logger.Infof("Remote changes detected, syncing...")
 		m.enqueueSync("") // Sync all files
 	}
 }
@@ -482,7 +482,7 @@ func (m *Manager) startQueueCleanup(ctx context.Context) {
 		case <-ticker.C:
 			// Clean up operations older than 24 hours or with too many retries
 			if err := m.queue.Cleanup(24*time.Hour, m.config.RetryAttempts); err != nil {
-				m.logger.Printf("Failed to cleanup queue: %v", err)
+				m.logger.Errorf("Failed to cleanup queue: %v", err)
 			}
 		}
 	}
@@ -490,7 +490,7 @@ func (m *Manager) startQueueCleanup(ctx context.Context) {
 
 // Stop gracefully stops the auto-sync manager
 func (m *Manager) Stop() error {
-	m.logger.Printf("Stopping auto-sync manager")
+	m.logger.Infof("Stopping auto-sync manager")
 	m.shutdown()
 	select {
 	case <-m.workerStarted:
@@ -504,7 +504,7 @@ func (m *Manager) shutdown() {
 	m.shutdownOnce.Do(func() {
 		close(m.done)
 		if err := m.watcher.Close(); err != nil {
-			m.logger.Printf("Failed to stop file watcher: %v", err)
+			m.logger.Errorf("Failed to stop file watcher: %v", err)
 		}
 	})
 }

@@ -3,14 +3,14 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"log"
-	"os"
+	"log/slog"
 
 	"github.com/google/go-github/v57/github"
 	"github.com/spf13/cobra"
 
 	"github.com/itcaat/catapult/internal/config"
 	"github.com/itcaat/catapult/internal/issues"
+	"github.com/itcaat/catapult/internal/logging"
 )
 
 // NewIssuesCmd creates the issues command
@@ -63,7 +63,7 @@ func NewIssuesListCmd() *cobra.Command {
 			}
 
 			// Create issue manager
-			logger := log.New(os.Stdout, "", 0)
+			logger := logging.From(slog.Default())
 			manager, err := issues.NewManager(client, user.GetLogin(), &cfg.Issues, logger)
 			if err != nil {
 				return fmt.Errorf("failed to create issue manager: %w", err)

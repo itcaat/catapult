@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/itcaat/catapult/internal/issues"
+	"github.com/itcaat/catapult/internal/logging"
 	"github.com/itcaat/catapult/internal/repository"
 	"github.com/itcaat/catapult/internal/storage"
 )
@@ -46,7 +46,7 @@ type Syncer struct {
 	repo           repository.Repository
 	fileManager    *storage.FileManager
 	issueManager   issues.IssueManager
-	logger         *log.Logger
+	logger         *logging.Logger
 	conflictPolicy ConflictPolicy
 }
 
@@ -67,7 +67,7 @@ func NewWithConflictPolicy(repo repository.Repository, fileManager *storage.File
 }
 
 // NewWithIssueManager creates a new Syncer instance with issue management
-func NewWithIssueManager(repo repository.Repository, fileManager *storage.FileManager, issueManager issues.IssueManager, logger *log.Logger) *Syncer {
+func NewWithIssueManager(repo repository.Repository, fileManager *storage.FileManager, issueManager issues.IssueManager, logger *logging.Logger) *Syncer {
 	return &Syncer{
 		repo:           repo,
 		fileManager:    fileManager,
@@ -77,7 +77,7 @@ func NewWithIssueManager(repo repository.Repository, fileManager *storage.FileMa
 	}
 }
 
-func NewWithIssueManagerAndConflictPolicy(repo repository.Repository, fileManager *storage.FileManager, issueManager issues.IssueManager, logger *log.Logger, policy ConflictPolicy) *Syncer {
+func NewWithIssueManagerAndConflictPolicy(repo repository.Repository, fileManager *storage.FileManager, issueManager issues.IssueManager, logger *logging.Logger, policy ConflictPolicy) *Syncer {
 	s := NewWithConflictPolicy(repo, fileManager, policy)
 	s.issueManager = issueManager
 	s.logger = logger
@@ -168,7 +168,7 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 			if err := s.fileManager.RecordSyncError(result.Path, result.Error); err != nil {
 				// Log error but continue
 				if s.logger != nil {
-					s.logger.Printf("Failed to record sync error for %s: %v", result.Path, err)
+					s.logger.Errorf("Failed to record sync error for %s: %v", result.Path, err)
 				}
 			}
 
@@ -179,7 +179,7 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 			if err := s.fileManager.ClearSyncError(result.Path); err != nil {
 				// Log error but continue
 				if s.logger != nil {
-					s.logger.Printf("Failed to clear sync error for %s: %v", result.Path, err)
+					s.logger.Errorf("Failed to clear sync error for %s: %v", result.Path, err)
 				}
 			}
 		}
@@ -384,12 +384,12 @@ func (s *Syncer) handleSyncError(out io.Writer, path string, err error) {
 	// Create issue if issue manager is available
 	if s.issueManager != nil {
 		if s.logger != nil {
-			s.logger.Printf("Creating issue for sync error: %s - %v", path, err)
+			s.logger.Infof("Creating issue for sync error: %s - %v", path, err)
 		}
 		s.createIssueForError(path, err)
 	} else {
 		if s.logger != nil {
-			s.logger.Printf("Issue manager not available, skipping issue creation for: %s", path)
+			s.logger.Infof("Issue manager not available, skipping issue creation for: %s", path)
 		}
 	}
 
@@ -455,13 +455,13 @@ func (s *Syncer) handleSyncError(out io.Writer, path string, err error) {
 // createIssueForError creates a GitHub issue for the sync error
 func (s *Syncer) createIssueForError(path string, err error) {
 	if s.logger != nil {
-		s.logger.Printf("Starting issue creation for error: %v", err)
+		s.logger.Infof("Starting issue creation for error: %v", err)
 	}
 
 	// Categorize the error
 	category := s.categorizeError(err)
 	if s.logger != nil {
-		s.logger.Printf("Categorized error as: %v", category)
+		s.logger.Infof("Categorized error as: %v", category)
 	}
 
 	// Create issue
@@ -480,28 +480,28 @@ func (s *Syncer) createIssueForError(path string, err error) {
 	}
 
 	if s.logger != nil {
-		s.logger.Printf("Created issue object: %s", issue.Title)
+		s.logger.Infof("Created issue object: %s", issue.Title)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if s.logger != nil {
-		s.logger.Printf("Calling issue manager CreateIssue...")
+		s.logger.Infof("Calling issue manager CreateIssue...")
 	}
 
 	githubIssue, createErr := s.issueManager.CreateIssue(ctx, issue)
 	if createErr != nil {
 		if s.logger != nil {
-			s.logger.Printf("Failed to create issue for sync error: %v", createErr)
+			s.logger.Errorf("Failed to create issue for sync error: %v", createErr)
 		}
 		return
 	}
 
 	if s.logger != nil && githubIssue != nil {
-		s.logger.Printf("Successfully created issue #%d for sync error: %s", githubIssue.Number, githubIssue.Title)
+		s.logger.Infof("Successfully created issue #%d for sync error: %s", githubIssue.Number, githubIssue.Title)
 	} else if s.logger != nil {
-		s.logger.Printf("Issue creation returned nil issue")
+		s.logger.Infof("Issue creation returned nil issue")
 	}
 }
 

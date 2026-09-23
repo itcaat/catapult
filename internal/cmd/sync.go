@@ -3,13 +3,14 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 
 	"github.com/google/go-github/v57/github"
 	"github.com/itcaat/catapult/internal/autosync"
 	"github.com/itcaat/catapult/internal/config"
 	"github.com/itcaat/catapult/internal/issues"
+	"github.com/itcaat/catapult/internal/logging"
 	"github.com/itcaat/catapult/internal/repository"
 	"github.com/itcaat/catapult/internal/storage"
 	"github.com/itcaat/catapult/internal/sync"
@@ -74,7 +75,7 @@ func NewSyncCmd() *cobra.Command {
 			var syncer *sync.Syncer
 			if cfg.Issues.Enabled {
 				// Create logger for issue management
-				logger := log.New(os.Stdout, "[ISSUES] ", log.LstdFlags)
+				logger := logging.From(slog.Default())
 
 				// Create issue manager
 				issueManager, err := issues.NewManager(client, user.GetLogin(), &cfg.Issues, logger)
@@ -97,7 +98,7 @@ func NewSyncCmd() *cobra.Command {
 				fmt.Println("⚡ Press Ctrl+C to stop watching")
 
 				// Create logger for auto-sync
-				logger := log.New(os.Stdout, "[AUTO-SYNC] ", log.LstdFlags)
+				logger := logging.From(slog.Default())
 
 				// Create auto-sync manager
 				manager, err := autosync.NewManager(cfg, syncer, fileManager, repo, logger)
