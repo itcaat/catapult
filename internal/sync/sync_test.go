@@ -374,3 +374,56 @@ func TestSyncFileByPathLocalDeletion(t *testing.T) {
 		})
 	}
 }
+
+func TestConflictPolicies(t *testing.T) {
+	policies := []struct {
+		name       string
+		policy     ConflictPolicy
+		wantLocal  string
+		wantRemote string
+	}{
+		{"keep-both", ConflictPolicyKeepBoth, "local content", "remote content"},
+		{"local-wins", ConflictPolicyLocalWins, "local content", "remote content"},
+		{"remote-wins", ConflictPolicyRemoteWins, "remote content", "remote content"},
+	}
+
+	for _, tt := range policies {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			path := filepath.Join(tempDir, "conflict.txt")
+			assert.NoError(t, os.WriteFile(path, []byte("base content"), 0644))
+			fileManager := storage.NewFileManager(tempDir)
+			assert.NoError(t, fileManager.ScanDirectory())
+			info, err := fileManager.GetFileInfo(path)
+			assert.NoError(t, err)
+			info.LastSyncedHash, err = fileManager.CalculateFileHash(path)
+			assert.NoError(t, err)
+			info.LastSyncedRemoteSHA = "old-sha"
+			assert.NoError(t, os.WriteFile(path, []byte("local content"), 0644))
+
+			mockRepo := new(MockRepository)
+			if tt.policy == ConflictPolicyLocalWins {
+				mockRepo.On("UpdateFile", mock.Anything, "conflict.txt", "local content").Return(nil).Once()
+			}
+			syncer := NewWithConflictPolicy(mockRepo, fileManager, tt.policy)
+			result := syncer.syncFileByPath(context.Background(), info, "conflict.txt", &repository.RemoteFileInfo{
+				Path: "conflict.txt", Content: "remote content", SHA: "new-sha",
+			})
+			assert.NoError(t, result.Error)
+			assert.Equal(t, SyncStatusConflict, result.Status)
+			mockRepo.AssertExpectations(t)
+
+			local, err := os.ReadFile(path)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantLocal, string(local))
+			if tt.policy == ConflictPolicyKeepBoth {
+				localBackup, err := os.ReadFile(filepath.Join(tempDir, ".catapult", "conflicts", "conflict.txt.local"))
+				assert.NoError(t, err)
+				assert.Equal(t, "local content", string(localBackup))
+				remoteBackup, err := os.ReadFile(filepath.Join(tempDir, ".catapult", "conflicts", "conflict.txt.remote"))
+				assert.NoError(t, err)
+				assert.Equal(t, tt.wantRemote, string(remoteBackup))
+			}
+		})
+	}
+}

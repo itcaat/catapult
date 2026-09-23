@@ -26,9 +26,11 @@ type FileInfo struct {
 	Deleted             bool      `json:"deleted,omitempty"` // Track if file was deleted locally
 
 	// Error tracking fields
-	LastSyncErrorMsg string    `json:"last_sync_error,omitempty"`
-	LastSyncAttempt  time.Time `json:"last_sync_attempt,omitempty"`
-	SyncRetryCount   int       `json:"sync_retry_count,omitempty"`
+	LastSyncErrorMsg  string    `json:"last_sync_error,omitempty"`
+	LastSyncAttempt   time.Time `json:"last_sync_attempt,omitempty"`
+	SyncRetryCount    int       `json:"sync_retry_count,omitempty"`
+	ConflictLocalHash string    `json:"conflict_local_hash,omitempty"`
+	ConflictRemoteSHA string    `json:"conflict_remote_sha,omitempty"`
 }
 
 // SyncStatus represents the synchronization status of a file
@@ -387,7 +389,35 @@ func (fm *FileManager) updateSyncInfoLocked(path, remoteSHA string) error {
 	// Update sync info
 	fileInfo.LastSyncedHash = currentHash
 	fileInfo.LastSyncedRemoteSHA = remoteSHA
+	fileInfo.ConflictLocalHash = ""
+	fileInfo.ConflictRemoteSHA = ""
 
+	return nil
+}
+
+// RecordConflict remembers the versions captured for an unresolved conflict.
+func (fm *FileManager) RecordConflict(path, remoteSHA string) error {
+	fm.mutex.Lock()
+	defer fm.mutex.Unlock()
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path: %w", err)
+	}
+	fileInfo, exists := fm.files[absPath]
+	if !exists {
+		return fmt.Errorf("file not tracked: %s", path)
+	}
+	localHash, err := fm.calculateFileHash(fileInfo.Path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fileInfo.ConflictLocalHash = "deleted"
+			fileInfo.ConflictRemoteSHA = remoteSHA
+			return nil
+		}
+		return fmt.Errorf("failed to calculate current hash: %w", err)
+	}
+	fileInfo.ConflictLocalHash = localHash
+	fileInfo.ConflictRemoteSHA = remoteSHA
 	return nil
 }
 
@@ -420,9 +450,15 @@ func (fm *FileManager) SaveConflictVersions(path, remoteContent string) error {
 		return fmt.Errorf("failed to create backup directory: %w", err)
 	}
 
-	// Copy local file to backup
+	// Preserve a local deletion as a recoverable marker.
 	if err := copyFile(fileInfo.Path, localBackup); err != nil {
-		return fmt.Errorf("failed to backup local file: %w", err)
+		if os.IsNotExist(err) {
+			if writeErr := os.WriteFile(localBackup, []byte("catapult: file was deleted locally\n"), 0644); writeErr != nil {
+				return fmt.Errorf("failed to save local deletion marker: %w", writeErr)
+			}
+		} else {
+			return fmt.Errorf("failed to backup local file: %w", err)
+		}
 	}
 
 	// Save remote content to backup

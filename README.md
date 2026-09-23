@@ -191,7 +191,10 @@ repository:
 storage:
   base_dir: "./catapult-files"
   state_path: "./catapult-files/.catapult-state.json"
+conflict_policy: "keep-both" # keep-both, local-wins, or remote-wins
 ```
+
+When both local and remote versions changed, Catapult defaults to `keep-both`: it leaves the working file and repository untouched and saves `.catapult/conflicts/<path>.local` and `.remote`. Resolve explicitly with `catapult sync --conflict-policy=local-wins`, `remote-wins`, or `keep-both`. Repeating sync does not rewrite the same unresolved conflict artifacts.
 
 ### Auto-Sync Configuration (Future)
 ```yaml
@@ -335,7 +338,7 @@ systemctl --user restart catapult
 - **Connectivity Problems**: Multi-endpoint testing ensures robust detection
 
 ### File Sync Issues
-- **Conflicts**: Currently resolved using local version (future: interactive resolution)
+- **Conflicts**: Preserved by default; resolve with `--conflict-policy=keep-both`, `local-wins`, or `remote-wins`
 - **Large Files**: Efficient streaming with progress indicators
 - **Permissions**: Ensure read/write access to sync directory
 

@@ -24,7 +24,8 @@ type Config struct {
 	Repository struct {
 		Name string `yaml:"name"`
 	} `yaml:"repository"`
-	Issues IssueConfig `yaml:"issues"`
+	Issues         IssueConfig `yaml:"issues"`
+	ConflictPolicy string      `yaml:"conflict_policy"`
 }
 
 // IssueConfig holds configuration for GitHub issue management
@@ -75,6 +76,9 @@ func Load() (*Config, error) {
 
 	// Set issue management defaults
 	setIssueDefaults(&cfg.Issues)
+	if cfg.ConflictPolicy == "" {
+		cfg.ConflictPolicy = "keep-both"
+	}
 
 	// Expand tilde paths if they exist
 	cfg.Storage.BaseDir = expandTildePath(cfg.Storage.BaseDir, home)

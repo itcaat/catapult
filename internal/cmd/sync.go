@@ -19,6 +19,7 @@ import (
 // NewSyncCmd creates and returns the sync command
 func NewSyncCmd() *cobra.Command {
 	var watchMode bool
+	var conflictPolicy string
 
 	cmd := &cobra.Command{
 		Use:   "sync",
@@ -61,6 +62,14 @@ func NewSyncCmd() *cobra.Command {
 			// Create repository instance
 			repo := repository.New(client, user.GetLogin(), cfg.Repository.Name)
 
+			policy := cfg.ConflictPolicy
+			if conflictPolicy != "" {
+				policy = conflictPolicy
+			}
+			if policy != string(sync.ConflictPolicyKeepBoth) && policy != string(sync.ConflictPolicyLocalWins) && policy != string(sync.ConflictPolicyRemoteWins) {
+				return fmt.Errorf("invalid conflict policy %q (use keep-both, local-wins, or remote-wins)", policy)
+			}
+
 			// Create sync instance with issue management if enabled
 			var syncer *sync.Syncer
 			if cfg.Issues.Enabled {
@@ -72,13 +81,13 @@ func NewSyncCmd() *cobra.Command {
 				if err != nil {
 					fmt.Printf("⚠️  Warning: Failed to initialize issue management: %v\n", err)
 					fmt.Println("💡 Continuing without automatic issue creation")
-					syncer = sync.New(repo, fileManager)
+					syncer = sync.NewWithConflictPolicy(repo, fileManager, sync.ConflictPolicy(policy))
 				} else {
-					syncer = sync.NewWithIssueManager(repo, fileManager, issueManager, logger)
+					syncer = sync.NewWithIssueManagerAndConflictPolicy(repo, fileManager, issueManager, logger, sync.ConflictPolicy(policy))
 					fmt.Println("🎯 Issue management enabled - sync problems will create GitHub issues")
 				}
 			} else {
-				syncer = sync.New(repo, fileManager)
+				syncer = sync.NewWithConflictPolicy(repo, fileManager, sync.ConflictPolicy(policy))
 			}
 
 			// If watch mode is enabled, start auto-sync
@@ -116,6 +125,7 @@ func NewSyncCmd() *cobra.Command {
 
 	// Add --watch flag
 	cmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Watch for file changes and sync automatically")
+	cmd.Flags().StringVar(&conflictPolicy, "conflict-policy", "", "Conflict policy: keep-both, local-wins, or remote-wins")
 
 	return cmd
 }

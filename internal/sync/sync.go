@@ -18,6 +18,14 @@ import (
 // SyncStatus represents the synchronization status of a file
 type SyncStatus int
 
+type ConflictPolicy string
+
+const (
+	ConflictPolicyKeepBoth   ConflictPolicy = "keep-both"
+	ConflictPolicyLocalWins  ConflictPolicy = "local-wins"
+	ConflictPolicyRemoteWins ConflictPolicy = "remote-wins"
+)
+
 const (
 	SyncStatusSynced SyncStatus = iota
 	SyncStatusLocalChanges
@@ -35,28 +43,45 @@ type SyncResult struct {
 
 // Syncer handles file synchronization between local storage and GitHub
 type Syncer struct {
-	repo         repository.Repository
-	fileManager  *storage.FileManager
-	issueManager issues.IssueManager
-	logger       *log.Logger
+	repo           repository.Repository
+	fileManager    *storage.FileManager
+	issueManager   issues.IssueManager
+	logger         *log.Logger
+	conflictPolicy ConflictPolicy
 }
 
 // New creates a new Syncer instance
 func New(repo repository.Repository, fileManager *storage.FileManager) *Syncer {
 	return &Syncer{
-		repo:        repo,
-		fileManager: fileManager,
+		repo:           repo,
+		fileManager:    fileManager,
+		conflictPolicy: ConflictPolicyKeepBoth,
 	}
+}
+
+func NewWithConflictPolicy(repo repository.Repository, fileManager *storage.FileManager, policy ConflictPolicy) *Syncer {
+	if policy != ConflictPolicyKeepBoth && policy != ConflictPolicyLocalWins && policy != ConflictPolicyRemoteWins {
+		policy = ConflictPolicyKeepBoth
+	}
+	return &Syncer{repo: repo, fileManager: fileManager, conflictPolicy: policy}
 }
 
 // NewWithIssueManager creates a new Syncer instance with issue management
 func NewWithIssueManager(repo repository.Repository, fileManager *storage.FileManager, issueManager issues.IssueManager, logger *log.Logger) *Syncer {
 	return &Syncer{
-		repo:         repo,
-		fileManager:  fileManager,
-		issueManager: issueManager,
-		logger:       logger,
+		repo:           repo,
+		fileManager:    fileManager,
+		issueManager:   issueManager,
+		logger:         logger,
+		conflictPolicy: ConflictPolicyKeepBoth,
 	}
+}
+
+func NewWithIssueManagerAndConflictPolicy(repo repository.Repository, fileManager *storage.FileManager, issueManager issues.IssueManager, logger *log.Logger, policy ConflictPolicy) *Syncer {
+	s := NewWithConflictPolicy(repo, fileManager, policy)
+	s.issueManager = issueManager
+	s.logger = logger
+	return s
 }
 
 // SyncAll synchronizes all files in the directory
@@ -131,7 +156,8 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 			fmt.Fprintf(out, "📥 Downloaded: %s\n", relPath)
 			pulled++
 		case SyncStatusConflict:
-			fmt.Fprintf(out, "⚠️  Conflict: remote version kept; local deletion requires confirmation: %s\n", relPath)
+			fmt.Fprintf(out, "⚠️  Conflict (%s): %s\n", s.conflictPolicy, relPath)
+			fmt.Fprintln(out, "   Resolve with --conflict-policy=local-wins, remote-wins, or keep-both; keep-both stores .local and .remote copies in .catapult/conflicts/")
 			conflicted++
 		case SyncStatusDeleted:
 			fmt.Fprintf(out, "🗑️  Deleted from repository: %s\n", relPath)
@@ -215,7 +241,36 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 			// remote file if it is still the version we last synced. Otherwise the
 			// remote change would be lost without giving the user a chance to keep it.
 			if remoteFile.SHA != file.LastSyncedRemoteSHA {
-				return SyncResult{Path: file.Path, Status: SyncStatusConflict}
+				switch s.conflictPolicy {
+				case ConflictPolicyLocalWins:
+					if err := s.repo.DeleteFile(ctx, relPath); err != nil {
+						return SyncResult{Path: file.Path, Status: SyncStatusConflict, Error: err}
+					}
+					s.fileManager.RemoveFile(file.Path)
+					return SyncResult{Path: file.Path, Status: SyncStatusDeleted}
+				case ConflictPolicyRemoteWins:
+					if err := os.MkdirAll(filepath.Dir(file.Path), 0755); err != nil {
+						return SyncResult{Path: file.Path, Status: SyncStatusConflict, Error: err}
+					}
+					if err := os.WriteFile(file.Path, []byte(remoteFile.Content), 0644); err != nil {
+						return SyncResult{Path: file.Path, Status: SyncStatusConflict, Error: err}
+					}
+					if err := s.fileManager.UpdateSyncInfo(file.Path, remoteFile.SHA); err != nil {
+						return SyncResult{Path: file.Path, Status: SyncStatusConflict, Error: err}
+					}
+					return SyncResult{Path: file.Path, Status: SyncStatusRemoteChanges}
+				case ConflictPolicyKeepBoth:
+					if file.ConflictRemoteSHA == remoteFile.SHA && file.ConflictLocalHash == "deleted" {
+						return SyncResult{Path: file.Path, Status: SyncStatusConflict}
+					}
+					if err := s.fileManager.SaveConflictVersions(file.Path, remoteFile.Content); err != nil {
+						return SyncResult{Path: file.Path, Status: SyncStatusConflict, Error: err}
+					}
+					if err := s.fileManager.RecordConflict(file.Path, remoteFile.SHA); err != nil {
+						return SyncResult{Path: file.Path, Status: SyncStatusConflict, Error: err}
+					}
+					return SyncResult{Path: file.Path, Status: SyncStatusConflict}
+				}
 			}
 
 			if err := s.repo.DeleteFile(ctx, relPath); err != nil {
@@ -291,7 +346,10 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 	}
 
 	// Both local and remote have changes - this is a conflict
-	if err := s.resolveConflict(ctx, file, relPath, localContent, []byte(remoteFile.Content)); err != nil {
+	if file.ConflictLocalHash != "" && file.ConflictLocalHash == currentLocalHash && file.ConflictRemoteSHA == remoteFile.SHA {
+		return SyncResult{Path: file.Path, Status: SyncStatusConflict}
+	}
+	if err := s.resolveConflict(ctx, file, relPath, localContent, []byte(remoteFile.Content), remoteFile.SHA); err != nil {
 		return SyncResult{Path: file.Path, Status: SyncStatusConflict, Error: err}
 	}
 
@@ -299,21 +357,26 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 }
 
 // resolveConflict resolves a file conflict
-func (s *Syncer) resolveConflict(ctx context.Context, file *storage.FileInfo, relPath string, localContent, remoteContent []byte) error {
-	// For now, just use local content
-	if err := s.repo.UpdateFile(ctx, relPath, string(localContent)); err != nil {
-		return err
+func (s *Syncer) resolveConflict(ctx context.Context, file *storage.FileInfo, relPath string, localContent, remoteContent []byte, remoteSHA string) error {
+	switch s.conflictPolicy {
+	case ConflictPolicyLocalWins:
+		if err := s.repo.UpdateFile(ctx, relPath, string(localContent)); err != nil {
+			return err
+		}
+		return s.fileManager.UpdateSyncInfo(file.Path, s.fileManager.CalculateGitSHAFromContent(localContent))
+	case ConflictPolicyRemoteWins:
+		if err := os.WriteFile(file.Path, remoteContent, 0644); err != nil {
+			return err
+		}
+		return s.fileManager.UpdateSyncInfo(file.Path, remoteSHA)
+	case ConflictPolicyKeepBoth:
+		if err := s.fileManager.SaveConflictVersions(file.Path, string(remoteContent)); err != nil {
+			return err
+		}
+		return s.fileManager.RecordConflict(file.Path, remoteSHA)
+	default:
+		return fmt.Errorf("unsupported conflict policy %q", s.conflictPolicy)
 	}
-
-	// Calculate local Git SHA to save as remote SHA (since we uploaded local content)
-	localGitSHA := s.fileManager.CalculateGitSHAFromContent(localContent)
-
-	// Update sync info with the new SHA
-	if err := s.fileManager.UpdateSyncInfo(file.Path, localGitSHA); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 // handleSyncError provides enhanced error handling with user-friendly messages and creates GitHub issues
