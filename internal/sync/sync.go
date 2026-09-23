@@ -241,6 +241,9 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 			// remote file if it is still the version we last synced. Otherwise the
 			// remote change would be lost without giving the user a chance to keep it.
 			if remoteFile.SHA != file.LastSyncedRemoteSHA {
+				if err := s.loadRemoteContent(ctx, relPath, remoteFile); err != nil {
+					return SyncResult{Path: file.Path, Status: SyncStatusConflict, Error: err}
+				}
 				switch s.conflictPolicy {
 				case ConflictPolicyLocalWins:
 					if err := s.repo.DeleteFile(ctx, relPath); err != nil {
@@ -282,6 +285,9 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 
 			return SyncResult{Path: file.Path, Status: SyncStatusDeleted}
 		} else {
+			if err := s.loadRemoteContent(ctx, relPath, remoteFile); err != nil {
+				return SyncResult{Path: file.Path, Error: err}
+			}
 			// File was never synced locally - download from remote
 			// Create directory if it doesn't exist
 			if err := os.MkdirAll(filepath.Dir(file.Path), 0755); err != nil {
@@ -312,9 +318,22 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 		return SyncResult{Path: file.Path, Error: err}
 	}
 
-	// Compare content
-	if string(localContent) == remoteFile.Content {
+	// Git blob SHA is sufficient for the common unchanged case. This avoids
+	// downloading remote content for every file during a sync.
+	if s.fileManager.CalculateGitSHAFromContent(localContent) == remoteFile.SHA {
 		// Content is the same, update sync info
+		if err := s.fileManager.UpdateSyncInfo(file.Path, remoteFile.SHA); err != nil {
+			return SyncResult{Path: file.Path, Error: err}
+		}
+		return SyncResult{Path: file.Path, Status: SyncStatusSynced}
+	}
+	if err := s.loadRemoteContent(ctx, relPath, remoteFile); err != nil {
+		return SyncResult{Path: file.Path, Error: err}
+	}
+
+	// Compare content as a defensive fallback for providers returning a stale
+	// or non-standard SHA.
+	if string(localContent) == remoteFile.Content {
 		if err := s.fileManager.UpdateSyncInfo(file.Path, remoteFile.SHA); err != nil {
 			return SyncResult{Path: file.Path, Error: err}
 		}
@@ -354,6 +373,19 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 	}
 
 	return SyncResult{Path: file.Path, Status: SyncStatusConflict}
+}
+
+func (s *Syncer) loadRemoteContent(ctx context.Context, path string, remoteFile *repository.RemoteFileInfo) error {
+	if remoteFile.ContentLoaded || remoteFile.Content != "" {
+		return nil
+	}
+	content, err := s.repo.GetFile(ctx, path)
+	if err != nil {
+		return fmt.Errorf("failed to download remote file %q: %w", path, err)
+	}
+	remoteFile.Content = content
+	remoteFile.ContentLoaded = true
+	return nil
 }
 
 // resolveConflict resolves a file conflict

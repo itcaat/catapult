@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"net/http"
 	posixpath "path"
 	"strings"
 	"sync"
@@ -67,16 +68,31 @@ type GitHubAPIError struct {
 	FilePath   string
 }
 
+const githubFileSizeLimit = 100 * 1024 * 1024
+
 func (e *GitHubAPIError) Error() string {
 	return fmt.Sprintf("GitHub API error (HTTP %d) for '%s': %s", e.StatusCode, e.FilePath, e.Message)
+}
+
+// GitHubRateLimitError indicates that the bounded retry policy was exhausted.
+type GitHubRateLimitError struct {
+	StatusCode int
+	Message    string
+	RetryAfter time.Duration
+}
+
+func (e *GitHubRateLimitError) Error() string {
+	return fmt.Sprintf("GitHub API rate limit (HTTP %d): %s; retry after %s", e.StatusCode, e.Message, e.RetryAfter.Round(time.Second))
 }
 
 // RemoteFileInfo contains information about a remote file
 type RemoteFileInfo struct {
 	Path    string
 	Content string
-	SHA     string
-	Size    int
+	// ContentLoaded distinguishes a deliberately empty file from metadata-only entries.
+	ContentLoaded bool
+	SHA           string
+	Size          int
 }
 
 // Repository defines the interface for repository operations
@@ -270,15 +286,27 @@ func (r *GitHubRepository) GetFile(ctx context.Context, path string) (string, er
 	if err != nil {
 		return "", err
 	}
-	file, _, _, err := r.client.Repositories.GetContents(ctx, r.owner, r.name, path, &github.RepositoryContentGetOptions{
-		Ref: branch,
+	var file *github.RepositoryContent
+	err = r.withRateLimitRetry(ctx, func() error {
+		var callErr error
+		file, _, _, callErr = r.client.Repositories.GetContents(ctx, r.owner, r.name, path, &github.RepositoryContentGetOptions{Ref: branch})
+		return callErr
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to get file: %w", err)
 	}
+	if file == nil || file.GetType() != "file" {
+		return "", &GitHubValidationError{FilePath: path, Message: "GitHub returned a non-file or unsupported Contents API response", Details: "expected a file response"}
+	}
+	if file.GetSize() > githubFileSizeLimit {
+		return "", &FileSizeError{FilePath: path, FileSize: file.GetSize(), Limit: githubFileSizeLimit}
+	}
 	content, err := file.GetContent()
 	if err != nil {
-		return "", fmt.Errorf("failed to get file content: %w", err)
+		if file.GetSize() > githubFileSizeLimit {
+			return "", &FileSizeError{FilePath: path, FileSize: file.GetSize(), Limit: githubFileSizeLimit}
+		}
+		return "", &GitHubValidationError{FilePath: path, Message: "unable to decode file content (binary or unsupported response)", Details: err.Error()}
 	}
 	return content, nil
 }
@@ -355,124 +383,110 @@ func (r *GitHubRepository) FileExists(ctx context.Context, path string) (bool, e
 	return true, nil
 }
 
-// ListFiles gets all files from the repository
+// ListFiles gets all files from the repository using the scalable Git Trees API.
 func (r *GitHubRepository) ListFiles(ctx context.Context) ([]string, error) {
-	files := []string{}
-
-	// Get repository contents recursively
-	err := r.listFilesRecursive(ctx, "", &files)
+	metadata, err := r.listRemoteFiles(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list files: %w", err)
 	}
-
+	files := make([]string, 0, len(metadata))
+	for path := range metadata {
+		files = append(files, path)
+	}
 	return files, nil
 }
 
-// listFilesRecursive recursively lists files in a directory
-func (r *GitHubRepository) listFilesRecursive(ctx context.Context, path string, files *[]string) error {
-	branch, err := r.branch(ctx)
-	if err != nil {
-		return err
-	}
-	_, directoryContent, _, err := r.client.Repositories.GetContents(ctx, r.owner, r.name, path, &github.RepositoryContentGetOptions{
-		Ref: branch,
-	})
-	if err != nil {
-		return err
-	}
-
-	for _, content := range directoryContent {
-		if content.GetType() == "file" {
-			if path == "" {
-				*files = append(*files, content.GetName())
-			} else {
-				*files = append(*files, posixpath.Join(path, content.GetName()))
-			}
-		} else if content.GetType() == "dir" {
-			// Recursively get files from subdirectory
-			subPath := content.GetName()
-			if path != "" {
-				subPath = posixpath.Join(path, content.GetName())
-			}
-			err := r.listFilesRecursive(ctx, subPath, files)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-// GetAllFilesWithContent gets all files with their content efficiently
+// GetAllFilesWithContent returns remote metadata. Despite the historical name, it
+// intentionally does not download file contents; callers fetch individual files
+// only after comparing their SHA.
 func (r *GitHubRepository) GetAllFilesWithContent(ctx context.Context) (map[string]*RemoteFileInfo, error) {
-	files := make(map[string]*RemoteFileInfo)
+	return r.listRemoteFiles(ctx)
+}
 
-	// Get repository contents recursively with content
-	err := r.getAllFilesRecursive(ctx, "", files)
+func (r *GitHubRepository) listRemoteFiles(ctx context.Context) (map[string]*RemoteFileInfo, error) {
+	branch, err := r.branch(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get all files with content: %w", err)
+		return nil, err
 	}
-
+	var tree *github.Tree
+	err = r.withRateLimitRetry(ctx, func() error {
+		var callErr error
+		tree, _, callErr = r.client.Git.GetTree(ctx, r.owner, r.name, branch, true)
+		return callErr
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve repository tree: %w", err)
+	}
+	if tree == nil {
+		return nil, fmt.Errorf("GitHub returned an empty repository tree")
+	}
+	if tree.GetTruncated() {
+		return nil, fmt.Errorf("repository tree is truncated by GitHub's documented size limit; sync a smaller repository or split it into repositories")
+	}
+	files := make(map[string]*RemoteFileInfo)
+	for _, entry := range tree.Entries {
+		if entry.GetType() != "blob" {
+			continue
+		}
+		files[normalizeRemotePath(entry.GetPath())] = &RemoteFileInfo{Path: entry.GetPath(), SHA: entry.GetSHA(), Size: entry.GetSize()}
+	}
 	return files, nil
 }
 
-// getAllFilesRecursive recursively lists files in a directory and retrieves their content
-func (r *GitHubRepository) getAllFilesRecursive(ctx context.Context, path string, files map[string]*RemoteFileInfo) error {
-	branch, err := r.branch(ctx)
-	if err != nil {
-		return err
-	}
-	_, directoryContent, _, err := r.client.Repositories.GetContents(ctx, r.owner, r.name, path, &github.RepositoryContentGetOptions{
-		Ref: branch,
-	})
-	if err != nil {
-		return err
-	}
+const maxRateLimitRetries = 3
 
-	for _, content := range directoryContent {
-		if content.GetType() == "file" {
-			filePath := content.GetName()
-			if path != "" {
-				filePath = posixpath.Join(path, content.GetName())
-			}
-
-			// Get content if available, otherwise make a separate call
-			fileContent := ""
-			if content.Content != nil {
-				// Content is available in the API response (for small files)
-				decodedContent, err := content.GetContent()
-				if err == nil {
-					fileContent = decodedContent
-				}
-			}
-
-			// If content wasn't available in the listing, we'll get it separately
-			if fileContent == "" {
-				decodedContent, err := r.GetFile(ctx, filePath)
-				if err == nil {
-					fileContent = decodedContent
-				}
-			}
-
-			files[filePath] = &RemoteFileInfo{
-				Path:    filePath,
-				Content: fileContent,
-				SHA:     content.GetSHA(),
-				Size:    content.GetSize(),
-			}
-		} else if content.GetType() == "dir" {
-			// Recursively get files from subdirectory
-			subPath := content.GetName()
-			if path != "" {
-				subPath = posixpath.Join(path, content.GetName())
-			}
-			err := r.getAllFilesRecursive(ctx, subPath, files)
-			if err != nil {
-				return err
-			}
+func (r *GitHubRepository) withRateLimitRetry(ctx context.Context, request func() error) error {
+	var last error
+	for attempt := 0; attempt <= maxRateLimitRetries; attempt++ {
+		last = request()
+		if last == nil {
+			return nil
+		}
+		response, ok := last.(*github.ErrorResponse)
+		if !ok || !isRateLimited(response) {
+			return last
+		}
+		if attempt == maxRateLimitRetries {
+			return &GitHubRateLimitError{StatusCode: response.Response.StatusCode, Message: response.Message, RetryAfter: retryDelay(response.Response, attempt)}
+		}
+		if err := waitForRetry(ctx, retryDelay(response.Response, attempt)); err != nil {
+			return err
 		}
 	}
+	return last
+}
 
-	return nil
+func isRateLimited(response *github.ErrorResponse) bool {
+	if response == nil || response.Response == nil {
+		return false
+	}
+	if response.Response.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	return response.Response.StatusCode == http.StatusForbidden &&
+		(response.Response.Header.Get("X-RateLimit-Remaining") == "0" || strings.Contains(strings.ToLower(response.Message), "rate limit"))
+}
+
+func retryDelay(response *http.Response, attempt int) time.Duration {
+	delay := time.Duration(1<<attempt) * 100 * time.Millisecond
+	if response != nil && response.Header.Get("Retry-After") != "" {
+		if seconds, err := time.ParseDuration(response.Header.Get("Retry-After") + "s"); err == nil && seconds < 2*time.Second {
+			delay = seconds
+		}
+	}
+	if delay > 2*time.Second {
+		return 2 * time.Second
+	}
+	return delay
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

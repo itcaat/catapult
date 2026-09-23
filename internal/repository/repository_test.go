@@ -86,6 +86,84 @@ func TestGitHubRepositoryUsesDiscoveredDefaultBranchAndPOSIXPaths(t *testing.T) 
 	}
 }
 
+func TestGetAllFilesWithContentUsesTreeMetadataWithoutDownloadingContents(t *testing.T) {
+	var contentRequests int
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/repos/owner/repo":
+			return jsonResponse(`{"default_branch":"main"}`), nil
+		case "/repos/owner/repo/git/trees/main":
+			if r.URL.Query().Get("recursive") != "1" {
+				t.Fatalf("tree request is not recursive: %s", r.URL.RawQuery)
+			}
+			return jsonResponse(`{"truncated":false,"tree":[{"path":"empty.txt","mode":"100644","type":"blob","sha":"empty-sha","size":0},{"path":"nested/data.bin","mode":"100644","type":"blob","sha":"binary-sha","size":12},{"path":"nested","mode":"040000","type":"tree","sha":"tree-sha"}]} `), nil
+		case "/repos/owner/repo/contents/empty.txt", "/repos/owner/repo/contents/nested/data.bin":
+			contentRequests++
+		}
+		return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("not found"))}, nil
+	})
+	client := github.NewClient(&http.Client{Transport: transport})
+	baseURL, _ := url.Parse("https://api.github.test/")
+	client.BaseURL = baseURL
+	repo := &GitHubRepository{client: client, owner: "owner", name: "repo"}
+
+	files, err := repo.GetAllFilesWithContent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentRequests != 0 {
+		t.Fatalf("metadata listing downloaded %d file contents", contentRequests)
+	}
+	if files["empty.txt"].ContentLoaded || files["empty.txt"].Content != "" {
+		t.Fatalf("empty file should remain metadata-only: %#v", files["empty.txt"])
+	}
+	if files["nested/data.bin"].Size != 12 || files["nested/data.bin"].SHA != "binary-sha" {
+		t.Fatalf("unexpected metadata: %#v", files["nested/data.bin"])
+	}
+}
+
+func TestGetAllFilesWithContentFailsSafelyWhenTreeIsTruncated(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/repos/owner/repo" {
+			return jsonResponse(`{"default_branch":"main"}`), nil
+		}
+		return jsonResponse(`{"truncated":true,"tree":[]}`), nil
+	})
+	client := github.NewClient(&http.Client{Transport: transport})
+	baseURL, _ := url.Parse("https://api.github.test/")
+	client.BaseURL = baseURL
+	repo := &GitHubRepository{client: client, owner: "owner", name: "repo"}
+	_, err := repo.GetAllFilesWithContent(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("expected actionable truncated-tree error, got %v", err)
+	}
+}
+
+func TestGetFileRetriesRateLimitAndPreservesEmptyContent(t *testing.T) {
+	var attempts int
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/repos/owner/repo" {
+			return jsonResponse(`{"default_branch":"main"}`), nil
+		}
+		attempts++
+		if attempts < 3 {
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("rate limited"))}, nil
+		}
+		return jsonResponse(`{"type":"file","content":"","encoding":"base64","size":0}`), nil
+	})
+	client := github.NewClient(&http.Client{Transport: transport})
+	baseURL, _ := url.Parse("https://api.github.test/")
+	client.BaseURL = baseURL
+	repo := &GitHubRepository{client: client, owner: "owner", name: "repo"}
+	content, err := repo.GetFile(context.Background(), "empty.txt")
+	if err != nil || content != "" {
+		t.Fatalf("GetFile() = %q, %v; want empty content after retry", content, err)
+	}
+	if attempts != 3 {
+		t.Fatalf("rate-limit attempts = %d, want 3", attempts)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
