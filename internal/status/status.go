@@ -77,6 +77,9 @@ func determineFileStatus(file *storage.FileInfo, remoteFile *repository.RemoteFi
 	// Check if file was deleted locally SECOND (before checking remote existence)
 	if file.Deleted {
 		if remoteFile != nil {
+			if file.LastSyncedRemoteSHA != "" && file.LastSyncedRemoteSHA != remoteFile.SHA {
+				return "Conflict"
+			}
 			return "Deleted locally (needs remote deletion)"
 		} else {
 			return "Deleted locally"

@@ -297,3 +297,80 @@ func TestSyncFileByPath(t *testing.T) {
 		mockRepo.AssertExpectations(t)
 	})
 }
+
+func TestSyncFileByPathLocalDeletion(t *testing.T) {
+	tests := []struct {
+		name             string
+		lastSyncedSHA    string
+		remoteSHA        string
+		deleteError      error
+		wantStatus       SyncStatus
+		wantError        bool
+		wantDeleteCall   bool
+		wantStillTracked bool
+	}{
+		{
+			name:           "deletes unchanged remote file",
+			lastSyncedSHA:  "same-sha",
+			remoteSHA:      "same-sha",
+			wantStatus:     SyncStatusDeleted,
+			wantDeleteCall: true,
+		},
+		{
+			name:             "reports conflict when remote changed",
+			lastSyncedSHA:    "old-sha",
+			remoteSHA:        "new-sha",
+			wantStatus:       SyncStatusConflict,
+			wantDeleteCall:   false,
+			wantStillTracked: true,
+		},
+		{
+			name:             "keeps state when deletion fails",
+			lastSyncedSHA:    "same-sha",
+			remoteSHA:        "same-sha",
+			deleteError:      assert.AnError,
+			wantError:        true,
+			wantDeleteCall:   true,
+			wantStillTracked: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			fileManager := storage.NewFileManager(tempDir)
+			mockRepo := new(MockRepository)
+			syncer := New(mockRepo, fileManager)
+			path := filepath.Join(tempDir, "deleted.txt")
+			assert.NoError(t, os.WriteFile(path, []byte("local content"), 0644))
+			assert.NoError(t, fileManager.ScanDirectory())
+
+			remoteFile := &repository.RemoteFileInfo{
+				Path:    "deleted.txt",
+				Content: "remote content",
+				SHA:     tt.remoteSHA,
+			}
+			file := &storage.FileInfo{
+				Path:                path,
+				Deleted:             true,
+				LastSyncedRemoteSHA: tt.lastSyncedSHA,
+			}
+
+			if tt.wantDeleteCall {
+				mockRepo.On("DeleteFile", mock.Anything, "deleted.txt").Return(tt.deleteError).Once()
+			}
+
+			result := syncer.syncFileByPath(context.Background(), file, "deleted.txt", remoteFile)
+
+			assert.Equal(t, tt.wantStatus, result.Status)
+			assert.Equal(t, tt.wantError, result.Error != nil)
+			mockRepo.AssertExpectations(t)
+			_, trackingError := fileManager.GetFileInfo(path)
+			if tt.wantStillTracked {
+				assert.NoError(t, trackingError)
+			} else {
+				assert.Error(t, trackingError)
+			}
+		})
+	}
+}

@@ -131,7 +131,7 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 			fmt.Fprintf(out, "📥 Downloaded: %s\n", relPath)
 			pulled++
 		case SyncStatusConflict:
-			fmt.Fprintf(out, "⚠️  Conflict resolved (local version kept): %s\n", relPath)
+			fmt.Fprintf(out, "⚠️  Conflict: remote version kept; local deletion requires confirmation: %s\n", relPath)
 			conflicted++
 		case SyncStatusDeleted:
 			fmt.Fprintf(out, "🗑️  Deleted from repository: %s\n", relPath)
@@ -211,7 +211,13 @@ func (s *Syncer) syncFileByPath(ctx context.Context, file *storage.FileInfo, rel
 		// If it was never synced, download from remote
 
 		if file.LastSyncedRemoteSHA != "" {
-			// File was previously synced but now deleted locally - delete from remote
+			// File was previously synced but now deleted locally. Only delete the
+			// remote file if it is still the version we last synced. Otherwise the
+			// remote change would be lost without giving the user a chance to keep it.
+			if remoteFile.SHA != file.LastSyncedRemoteSHA {
+				return SyncResult{Path: file.Path, Status: SyncStatusConflict}
+			}
+
 			if err := s.repo.DeleteFile(ctx, relPath); err != nil {
 				return SyncResult{Path: file.Path, Error: fmt.Errorf("failed to delete remote file: %w", err)}
 			}

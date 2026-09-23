@@ -216,6 +216,18 @@ func TestDetermineFileStatus(t *testing.T) {
 		assert.Equal(t, "Deleted locally (needs remote deletion)", status)
 	})
 
+	t.Run("DeletedLocallyWithChangedRemote", func(t *testing.T) {
+		file := &storage.FileInfo{
+			Path:                "/test/file.txt",
+			Hash:                "localhash123",
+			Deleted:             true,
+			LastSyncedRemoteSHA: "oldremotesha",
+		}
+		remoteFile := &repository.RemoteFileInfo{Path: "file.txt", SHA: "newremotesha"}
+		status := determineFileStatus(file, remoteFile)
+		assert.Equal(t, "Conflict", status)
+	})
+
 	t.Run("DeletedLocallyNoRemote", func(t *testing.T) {
 		file := &storage.FileInfo{
 			Path:    "/test/file.txt",

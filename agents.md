@@ -85,6 +85,8 @@ be explicit.
 - Never write secrets, tokens, or complete API response bodies to stdout, logs, Issues, or
   commits.
 - Final progress updates must list changed files, checks performed, and remaining risks.
+- When finishing work, the final progress update must include the commit title. If no
+  commit was created, explicitly state that and provide the recommended commit title.
 
 ## Current audit priority order
 
