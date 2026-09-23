@@ -6,13 +6,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/itcaat/catapult/internal/config"
 	"github.com/itcaat/catapult/internal/network"
 	"github.com/itcaat/catapult/internal/repository"
 	"github.com/itcaat/catapult/internal/storage"
-	"github.com/itcaat/catapult/internal/sync"
+	catapultsync "github.com/itcaat/catapult/internal/sync"
 )
 
 // Config holds configuration for auto-sync
@@ -46,19 +47,30 @@ type Manager struct {
 	watcher         *Watcher
 	config          *Config
 	appConfig       *config.Config
-	syncer          *sync.Syncer
+	syncer          *catapultsync.Syncer
 	fileManager     *storage.FileManager
 	repo            repository.Repository
 	logger          *log.Logger
 	done            chan struct{}
 	networkDetector *network.Detector
 	queue           *Queue
+	jobs            chan syncJob
+	queuedJobs      map[string]struct{}
+	jobsMutex       sync.Mutex
+	workerDone      chan struct{}
+	workerStarted   chan struct{}
+	shutdownOnce    sync.Once
+}
+
+type syncJob struct {
+	path         string
+	processQueue bool
 }
 
 // NewManager creates a new auto-sync manager
 func NewManager(
 	appConfig *config.Config,
-	syncer *sync.Syncer,
+	syncer *catapultsync.Syncer,
 	fileManager *storage.FileManager,
 	repo repository.Repository,
 	logger *log.Logger,
@@ -97,6 +109,10 @@ func NewManager(
 		done:            make(chan struct{}),
 		networkDetector: networkDetector,
 		queue:           queue,
+		jobs:            make(chan syncJob, 64),
+		queuedJobs:      make(map[string]struct{}),
+		workerDone:      make(chan struct{}),
+		workerStarted:   make(chan struct{}),
 	}, nil
 }
 
@@ -109,15 +125,20 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	m.logger.Printf("Starting auto-sync manager")
 
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go m.syncWorker(workerCtx)
+	close(m.workerStarted)
+
 	// Process any pending queue items first
 	if m.config.OfflineQueue {
-		go m.processOfflineQueue(ctx)
+		go m.processOfflineQueue(workerCtx)
 	}
 
 	// Start file watcher if enabled
 	if m.config.WatchLocalChanges {
 		go func() {
-			if err := m.startFileWatcher(ctx); err != nil {
+			if err := m.startFileWatcher(workerCtx); err != nil {
 				m.logger.Printf("File watcher error: %v", err)
 			}
 		}()
@@ -126,19 +147,78 @@ func (m *Manager) Start(ctx context.Context) error {
 	// Start periodic remote checks if enabled
 	if m.config.CheckRemoteInterval > 0 {
 		go func() {
-			m.startPeriodicRemoteCheck(ctx)
+			m.startPeriodicRemoteCheck(workerCtx)
 		}()
 	}
 
 	// Start periodic queue cleanup
-	go m.startQueueCleanup(ctx)
+	go m.startQueueCleanup(workerCtx)
 
 	m.logger.Printf("Auto-sync manager started successfully")
 
-	// Wait for context cancellation
-	<-ctx.Done()
-	close(m.done)
+	// Wait for cancellation or an explicit Stop, then drain in-flight work.
+	select {
+	case <-ctx.Done():
+	case <-m.done:
+	}
+	m.shutdown()
+	<-m.workerDone
 	return ctx.Err()
+}
+
+func (m *Manager) syncWorker(ctx context.Context) {
+	defer close(m.workerDone)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.done:
+			return
+		case job := <-m.jobs:
+			if job.processQueue {
+				m.processPendingOperations()
+			} else {
+				m.syncFile(job.path)
+			}
+			m.jobsMutex.Lock()
+			delete(m.queuedJobs, jobKey(job))
+			m.jobsMutex.Unlock()
+		}
+	}
+}
+
+func jobKey(job syncJob) string {
+	if job.processQueue {
+		return "queue"
+	}
+	return "sync:" + job.path
+}
+
+func (m *Manager) enqueueSync(path string) {
+	m.enqueue(syncJob{path: path})
+}
+
+func (m *Manager) enqueueQueueProcessing() {
+	m.enqueue(syncJob{processQueue: true})
+}
+
+func (m *Manager) enqueue(job syncJob) {
+	key := jobKey(job)
+	m.jobsMutex.Lock()
+	if _, exists := m.queuedJobs[key]; exists {
+		m.jobsMutex.Unlock()
+		return
+	}
+	m.queuedJobs[key] = struct{}{}
+	m.jobsMutex.Unlock()
+
+	select {
+	case m.jobs <- job:
+	case <-m.done:
+		m.jobsMutex.Lock()
+		delete(m.queuedJobs, key)
+		m.jobsMutex.Unlock()
+	}
 }
 
 // startFileWatcher monitors local file changes
@@ -165,7 +245,7 @@ func (m *Manager) onFileChange(event FileEvent) {
 
 	// Try to sync immediately if online, otherwise queue
 	if m.networkDetector.IsConnected() {
-		m.syncFile(relPath)
+		m.enqueueSync(relPath)
 	} else {
 		m.queueOperation(relPath, "sync")
 	}
@@ -251,7 +331,7 @@ func (m *Manager) processOfflineQueue(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if m.networkDetector.IsConnected() {
-				m.processPendingOperations()
+				m.enqueueQueueProcessing()
 			}
 		}
 	}
@@ -386,7 +466,7 @@ func (m *Manager) checkRemoteChanges() {
 
 	if hasChanges {
 		m.logger.Printf("Remote changes detected, syncing...")
-		m.syncFile("") // Sync all files
+		m.enqueueSync("") // Sync all files
 	}
 }
 
@@ -411,5 +491,20 @@ func (m *Manager) startQueueCleanup(ctx context.Context) {
 // Stop gracefully stops the auto-sync manager
 func (m *Manager) Stop() error {
 	m.logger.Printf("Stopping auto-sync manager")
-	return m.watcher.Close()
+	m.shutdown()
+	select {
+	case <-m.workerStarted:
+		<-m.workerDone
+	default:
+	}
+	return nil
+}
+
+func (m *Manager) shutdown() {
+	m.shutdownOnce.Do(func() {
+		close(m.done)
+		if err := m.watcher.Close(); err != nil {
+			m.logger.Printf("Failed to stop file watcher: %v", err)
+		}
+	})
 }

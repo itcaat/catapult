@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -46,6 +47,7 @@ const (
 type FileManager struct {
 	baseDir string
 	files   map[string]*FileInfo
+	mutex   sync.RWMutex
 }
 
 // NewFileManager creates a new FileManager instance
@@ -63,6 +65,12 @@ func (fm *FileManager) BaseDir() string {
 
 // ScanDirectory scans the base directory for files and updates the tracking list
 func (fm *FileManager) ScanDirectory() error {
+	fm.mutex.Lock()
+	defer fm.mutex.Unlock()
+	return fm.scanDirectoryLocked()
+}
+
+func (fm *FileManager) scanDirectoryLocked() error {
 	// Save existing files data to preserve sync info
 	existingFiles := make(map[string]*FileInfo)
 	for path, info := range fm.files {
@@ -119,21 +127,27 @@ func (fm *FileManager) ScanDirectory() error {
 
 // GetTrackedFiles returns a list of tracked files
 func (fm *FileManager) GetTrackedFiles() []*FileInfo {
+	fm.mutex.Lock()
+	defer fm.mutex.Unlock()
+
 	// Scan directory before returning files
-	if err := fm.ScanDirectory(); err != nil {
+	if err := fm.scanDirectoryLocked(); err != nil {
 		// Log error but continue
 		fmt.Printf("Warning: failed to scan directory: %v\n", err)
 	}
 
 	files := make([]*FileInfo, 0, len(fm.files))
 	for _, file := range fm.files {
-		files = append(files, file)
+		fileCopy := *file
+		files = append(files, &fileCopy)
 	}
 	return files
 }
 
 // GetFileInfo returns information about a tracked file
 func (fm *FileManager) GetFileInfo(path string) (*FileInfo, error) {
+	fm.mutex.RLock()
+	defer fm.mutex.RUnlock()
 	// Get absolute path
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -146,7 +160,8 @@ func (fm *FileManager) GetFileInfo(path string) (*FileInfo, error) {
 		return nil, fmt.Errorf("file not tracked: %s", path)
 	}
 
-	return fileInfo, nil
+	fileCopy := *fileInfo
+	return &fileCopy, nil
 }
 
 // HasChanges checks if a file has been modified
@@ -180,6 +195,12 @@ func (fm *FileManager) HasChanges(path string) (bool, error) {
 
 // UpdateFileInfo updates the file information
 func (fm *FileManager) UpdateFileInfo(path string) error {
+	fm.mutex.Lock()
+	defer fm.mutex.Unlock()
+	return fm.updateFileInfoLocked(path)
+}
+
+func (fm *FileManager) updateFileInfoLocked(path string) error {
 	// Get file info
 	fileInfo, err := fm.GetFileInfo(path)
 	if err != nil {
@@ -208,6 +229,8 @@ func (fm *FileManager) UpdateFileInfo(path string) error {
 
 // SaveState saves the current state to a file
 func (fm *FileManager) SaveState(path string) error {
+	fm.mutex.RLock()
+	defer fm.mutex.RUnlock()
 	// Create state file
 	file, err := os.Create(path)
 	if err != nil {
@@ -234,6 +257,8 @@ func (fm *FileManager) LoadState(path string) error {
 	defer file.Close()
 
 	// Decode state
+	fm.mutex.Lock()
+	defer fm.mutex.Unlock()
 	decoder := json.NewDecoder(file)
 	if err := decoder.Decode(&fm.files); err != nil {
 		return fmt.Errorf("failed to decode state: %w", err)
@@ -298,6 +323,12 @@ func (fm *FileManager) calculateFileHash(path string) (string, error) {
 
 // GetSyncStatus determines the synchronization status of a file
 func (fm *FileManager) GetSyncStatus(path string) (SyncStatus, error) {
+	fm.mutex.RLock()
+	defer fm.mutex.RUnlock()
+	return fm.getSyncStatusLocked(path)
+}
+
+func (fm *FileManager) getSyncStatusLocked(path string) (SyncStatus, error) {
 	// Get file info
 	fileInfo, err := fm.GetFileInfo(path)
 	if err != nil {
@@ -330,6 +361,12 @@ func (fm *FileManager) GetSyncStatus(path string) (SyncStatus, error) {
 
 // UpdateSyncInfo updates the synchronization information for a file
 func (fm *FileManager) UpdateSyncInfo(path, remoteSHA string) error {
+	fm.mutex.Lock()
+	defer fm.mutex.Unlock()
+	return fm.updateSyncInfoLocked(path, remoteSHA)
+}
+
+func (fm *FileManager) updateSyncInfoLocked(path, remoteSHA string) error {
 	// Get file info
 	fileInfo, err := fm.GetFileInfo(path)
 	if err != nil {
@@ -417,11 +454,15 @@ func copyFile(src, dst string) error {
 
 // RemoveFile removes a file from tracking
 func (fm *FileManager) RemoveFile(path string) {
+	fm.mutex.Lock()
+	defer fm.mutex.Unlock()
 	delete(fm.files, path)
 }
 
 // RecordSyncError records a sync error for a file
 func (fm *FileManager) RecordSyncError(path string, err error) error {
+	fm.mutex.Lock()
+	defer fm.mutex.Unlock()
 	fileInfo, exists := fm.files[path]
 	if !exists {
 		return fmt.Errorf("file not tracked: %s", path)
@@ -436,6 +477,8 @@ func (fm *FileManager) RecordSyncError(path string, err error) error {
 
 // ClearSyncError clears the sync error for a file (called on successful sync)
 func (fm *FileManager) ClearSyncError(path string) error {
+	fm.mutex.Lock()
+	defer fm.mutex.Unlock()
 	fileInfo, exists := fm.files[path]
 	if !exists {
 		return fmt.Errorf("file not tracked: %s", path)
@@ -450,6 +493,8 @@ func (fm *FileManager) ClearSyncError(path string) error {
 
 // HasSyncError checks if a file has a sync error
 func (fm *FileManager) HasSyncError(path string) bool {
+	fm.mutex.RLock()
+	defer fm.mutex.RUnlock()
 	fileInfo, exists := fm.files[path]
 	if !exists {
 		return false
