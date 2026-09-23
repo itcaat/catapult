@@ -367,10 +367,16 @@ func (fm *FileManager) UpdateSyncInfo(path, remoteSHA string) error {
 }
 
 func (fm *FileManager) updateSyncInfoLocked(path, remoteSHA string) error {
-	// Get file info
-	fileInfo, err := fm.GetFileInfo(path)
+	// This method is called while fm.mutex is already locked. Do not call
+	// GetFileInfo here because it attempts to acquire a read lock and would
+	// deadlock against the write lock held by UpdateSyncInfo.
+	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get absolute path: %w", err)
+	}
+	fileInfo, exists := fm.files[absPath]
+	if !exists {
+		return fmt.Errorf("file not tracked: %s", path)
 	}
 
 	// Calculate current hash

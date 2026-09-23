@@ -61,6 +61,10 @@ func NewWithIssueManager(repo repository.Repository, fileManager *storage.FileMa
 
 // SyncAll synchronizes all files in the directory
 func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
+
+	startedAt := time.Now()
+	fmt.Fprintln(out, "[diagnostic] Scanning local files...")
+	scanStartedAt := time.Now()
 	// Scan directory for local files
 	if err := s.fileManager.ScanDirectory(); err != nil {
 		return fmt.Errorf("failed to scan directory: %w", err)
@@ -68,12 +72,17 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 
 	// Get local files
 	localFiles := s.fileManager.GetTrackedFiles()
+	fmt.Fprintf(out, "[diagnostic] Local scan finished in %s; tracked files: %d\n", time.Since(scanStartedAt).Round(time.Millisecond), len(localFiles))
 
 	// Get all remote files with content efficiently
+	fmt.Fprintln(out, "[diagnostic] Requesting remote files from GitHub...")
+	remoteStartedAt := time.Now()
 	remoteFiles, err := s.repo.GetAllFilesWithContent(ctx)
 	if err != nil {
+		fmt.Fprintf(out, "[diagnostic] GitHub request failed after %s: %v\n", time.Since(remoteStartedAt).Round(time.Millisecond), err)
 		return fmt.Errorf("failed to get remote files with content: %w", err)
 	}
+	fmt.Fprintf(out, "[diagnostic] GitHub request finished in %s; remote files: %d\n", time.Since(remoteStartedAt).Round(time.Millisecond), len(remoteFiles))
 
 	// Create a map of all files (local + remote)
 	allFiles := make(map[string]*storage.FileInfo)
@@ -106,7 +115,10 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 
 	// Sync each file
 	for relPath, file := range allFiles {
+		fileStartedAt := time.Now()
+		fmt.Fprintf(out, "[diagnostic] Processing %s...\n", relPath)
 		result := s.syncFileByPath(ctx, file, relPath, remoteFiles[relPath])
+		fmt.Fprintf(out, "[diagnostic] Finished %s in %s\n", relPath, time.Since(fileStartedAt).Round(time.Millisecond))
 
 		// Show what's happening with each file
 		switch result.Status {
@@ -154,6 +166,7 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 	fmt.Fprintf(out, "Pulled: %d\n", pulled)
 	fmt.Fprintf(out, "Conflicts: %d\n", conflicted)
 	fmt.Fprintf(out, "Deleted: %d\n", deleted)
+	fmt.Fprintf(out, "[diagnostic] Total sync duration: %s\n", time.Since(startedAt).Round(time.Millisecond))
 
 	return nil
 }
