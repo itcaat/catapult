@@ -133,19 +133,18 @@ func (df *DeviceFlow) requestDeviceCode() (*DeviceCode, error) {
 
 // pollForToken polls GitHub for the access token
 func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, error) {
-	// Prepare request body
+	// Prepare request values. A new request must be created for every poll:
+	// http.Client.Do consumes and closes the request body, so reusing the same
+	// *http.Request makes subsequent POSTs send an empty body.
 	body := url.Values{}
 	body.Set("client_id", df.config.ClientID)
 	body.Set("device_code", deviceCode)
 	body.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+	bodyData := body.Encode()
 
-	// Create request
-	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(body.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+	if interval <= 0 {
+		interval = int(pollInterval / time.Second)
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	// Calculate timeout
 	timeout := time.After(pollTimeout)
@@ -168,11 +167,20 @@ func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, err
 			pollCount++
 			fmt.Printf("[Poll #%d] Checking authorization status...\n", pollCount)
 
-			// Send request
+			// Create a fresh request for each poll because Do consumes req.Body.
+			req, err := http.NewRequest("POST", tokenURL, strings.NewReader(bodyData))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create request: %w", err)
+			}
+			req.Header.Set("Accept", "application/json")
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+			// Send request. A transient transport failure should not abort the
+			// device flow; the next poll can establish a new connection.
 			resp, err := df.client.Do(req)
 			if err != nil {
 				fmt.Printf("[Poll #%d] Request failed: %v\n", pollCount, err)
-				return nil, fmt.Errorf("failed to send request: %w", err)
+				continue
 			}
 
 			// Read response
