@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/itcaat/catapult/internal/persistence"
 )
 
 // QueueOperation represents a queued sync operation
@@ -132,7 +134,11 @@ func (q *Queue) Load() error {
 	// Parse JSON
 	var operations map[string]*QueueOperation
 	if err := json.Unmarshal(data, &operations); err != nil {
-		return fmt.Errorf("failed to parse queue file: %w", err)
+		backup, backupErr := persistence.BackupCorrupt(q.queuePath)
+		if backupErr != nil {
+			return fmt.Errorf("failed to parse queue file: %w (backup failed: %v)", err, backupErr)
+		}
+		return fmt.Errorf("failed to parse queue file: %w (corrupt file moved to %s)", err, backup)
 	}
 
 	q.operations = operations
@@ -157,8 +163,7 @@ func (q *Queue) persist() error {
 		return fmt.Errorf("failed to marshal queue: %w", err)
 	}
 
-	// Write to file
-	if err := os.WriteFile(q.queuePath, data, 0644); err != nil {
+	if err := persistence.WriteFile(q.queuePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write queue file: %w", err)
 	}
 

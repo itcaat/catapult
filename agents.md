@@ -34,6 +34,16 @@ When the user says “take issue #123” or “pick up #123”, this means:
 If an Issue is underspecified or conflicts with another requirement, add a question or
 comment to the Issue before expanding its scope.
 
+## Completing an Issue
+
+When the implementation is complete, checks pass, and a commit is ready to be proposed,
+the final update must include the commit summary and ask whether the user wants the Issue
+closed.
+
+Do not close the Issue automatically. Close it only after the user explicitly agrees.
+If the user agrees, verify the acceptance criteria and then close the Issue. Otherwise,
+leave it open and apply `status:ready-for-review` when appropriate.
+
 ## Status labels
 
 Use these labels:

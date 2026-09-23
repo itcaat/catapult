@@ -3,9 +3,60 @@ package autosync
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestQueue_PersistenceIsPrivateAndCorruptDataIsBackedUp(t *testing.T) {
+	tempDir := t.TempDir()
+	queuePath := filepath.Join(tempDir, "queue.json")
+	queue := NewQueue(queuePath, 10)
+	if err := queue.Add(&QueueOperation{ID: "one", FilePath: "a", Operation: "sync"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(queuePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("queue permissions = %o, want 600", got)
+	}
+	if err := os.WriteFile(queuePath, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewQueue(queuePath, 10).Load(); err == nil {
+		t.Fatal("expected corrupt queue error")
+	}
+	if _, err := os.Stat(queuePath); !os.IsNotExist(err) {
+		t.Fatalf("corrupt queue was not moved aside: %v", err)
+	}
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "queue.json.corrupt-") {
+		t.Fatalf("expected one corrupt backup, entries = %v", entries)
+	}
+}
+
+func TestQueue_ConcurrentSavesRemainValid(t *testing.T) {
+	queue := NewQueue(filepath.Join(t.TempDir(), "queue.json"), 1000)
+	done := make(chan struct{})
+	for i := 0; i < 20; i++ {
+		go func(i int) {
+			_ = queue.Add(&QueueOperation{ID: string(rune('a' + i)), FilePath: "file", Operation: "sync"})
+			done <- struct{}{}
+		}(i)
+	}
+	for i := 0; i < 20; i++ {
+		<-done
+	}
+	loaded := NewQueue(queue.queuePath, 1000)
+	if err := loaded.Load(); err != nil {
+		t.Fatalf("concurrent save produced invalid queue: %v", err)
+	}
+}
 
 func TestQueue_Add(t *testing.T) {
 	// Create temporary directory for test

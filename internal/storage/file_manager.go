@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/itcaat/catapult/internal/persistence"
 )
 
 // FileInfo represents metadata about a file
@@ -231,39 +233,36 @@ func (fm *FileManager) updateFileInfoLocked(path string) error {
 func (fm *FileManager) SaveState(path string) error {
 	fm.mutex.RLock()
 	defer fm.mutex.RUnlock()
-	// Create state file
-	file, err := os.Create(path)
+	data, err := json.Marshal(fm.files)
 	if err != nil {
-		return fmt.Errorf("failed to create state file: %w", err)
-	}
-	defer file.Close()
-
-	// Encode state
-	encoder := json.NewEncoder(file)
-	if err := encoder.Encode(fm.files); err != nil {
 		return fmt.Errorf("failed to encode state: %w", err)
 	}
-
+	if err := persistence.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("failed to save state: %w", err)
+	}
 	return nil
 }
 
 // LoadState loads the state from a file
 func (fm *FileManager) LoadState(path string) error {
-	// Open state file
-	file, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("failed to open state file: %w", err)
 	}
-	defer file.Close()
-
-	// Decode state
-	fm.mutex.Lock()
-	defer fm.mutex.Unlock()
-	decoder := json.NewDecoder(file)
-	if err := decoder.Decode(&fm.files); err != nil {
-		return fmt.Errorf("failed to decode state: %w", err)
+	var files map[string]*FileInfo
+	if err := json.Unmarshal(data, &files); err != nil {
+		backup, backupErr := persistence.BackupCorrupt(path)
+		if backupErr != nil {
+			return fmt.Errorf("failed to decode state: %w (backup failed: %v)", err, backupErr)
+		}
+		return fmt.Errorf("failed to decode state: %w (corrupt file moved to %s)", err, backup)
 	}
-
+	if files == nil {
+		files = make(map[string]*FileInfo)
+	}
+	fm.mutex.Lock()
+	fm.files = files
+	fm.mutex.Unlock()
 	return nil
 }
 
