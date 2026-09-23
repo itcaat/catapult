@@ -54,8 +54,7 @@ func NewInitCmd() *cobra.Command {
 				return fmt.Errorf("failed to save token: %w", err)
 			}
 
-			// Create GitHub client
-			fmt.Printf("Using token: %s\n", cfg.GitHub.Token)
+			// Create GitHub client. Never print the token: it is a credential.
 			client := github.NewClient(nil).WithAuthToken(token.AccessToken)
 
 			// Get authenticated user

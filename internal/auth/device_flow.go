@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -33,6 +34,7 @@ type DeviceCode struct {
 type DeviceFlow struct {
 	client *http.Client
 	config *Config
+	output io.Writer
 }
 
 // Config holds the OAuth application configuration
@@ -53,6 +55,7 @@ func NewDeviceFlow(config *Config) *DeviceFlow {
 	return &DeviceFlow{
 		client: &http.Client{},
 		config: config,
+		output: os.Stdout,
 	}
 }
 
@@ -65,8 +68,8 @@ func (df *DeviceFlow) Initiate() (*Token, error) {
 	}
 
 	// Display user code and verification URL
-	fmt.Printf("Please visit: %s\n", deviceCode.VerificationURI)
-	fmt.Printf("And enter code: %s\n", deviceCode.UserCode)
+	fmt.Fprintf(df.output, "Please visit: %s\n", deviceCode.VerificationURI)
+	fmt.Fprintf(df.output, "And enter code: %s\n", deviceCode.UserCode)
 
 	// Poll for token
 	token, err := df.pollForToken(deviceCode.DeviceCode, deviceCode.Interval)
@@ -84,11 +87,6 @@ func (df *DeviceFlow) requestDeviceCode() (*DeviceCode, error) {
 	body.Set("client_id", df.config.ClientID)
 	body.Set("scope", strings.Join(df.config.Scopes, " "))
 
-	// Print request details for debugging
-	fmt.Printf("Requesting device code from: %s\n", deviceCodeURL)
-	fmt.Printf("With client_id: %s\n", df.config.ClientID)
-	fmt.Printf("And scopes: %s\n", strings.Join(df.config.Scopes, " "))
-
 	// Create request
 	req, err := http.NewRequest("POST", deviceCodeURL, strings.NewReader(body.Encode()))
 	if err != nil {
@@ -96,9 +94,6 @@ func (df *DeviceFlow) requestDeviceCode() (*DeviceCode, error) {
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	// Print headers for debugging
-	fmt.Printf("Request headers: %v\n", req.Header)
 
 	// Send request
 	resp, err := df.client.Do(req)
@@ -113,13 +108,9 @@ func (df *DeviceFlow) requestDeviceCode() (*DeviceCode, error) {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Print response details for debugging
-	fmt.Printf("Response status: %d\n", resp.StatusCode)
-	fmt.Printf("Response body: %s\n", string(data))
-
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(data))
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
 	// Parse response
@@ -151,11 +142,11 @@ func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, err
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
 
-	fmt.Println("Waiting for authorization...")
-	fmt.Println("Please complete the authorization in your browser.")
-	fmt.Println("This window will automatically continue once you've authorized the application.")
-	fmt.Println("(Press Ctrl+C to cancel)")
-	fmt.Printf("Polling every %d seconds...\n", interval)
+	fmt.Fprintln(df.output, "Waiting for authorization...")
+	fmt.Fprintln(df.output, "Please complete the authorization in your browser.")
+	fmt.Fprintln(df.output, "This window will automatically continue once you've authorized the application.")
+	fmt.Fprintln(df.output, "(Press Ctrl+C to cancel)")
+	fmt.Fprintf(df.output, "Polling every %d seconds...\n", interval)
 
 	lastDot := time.Now()
 	pollCount := 0
@@ -165,7 +156,7 @@ func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, err
 			return nil, fmt.Errorf("polling timed out after %v", pollTimeout)
 		case <-ticker.C:
 			pollCount++
-			fmt.Printf("[Poll #%d] Checking authorization status...\n", pollCount)
+			fmt.Fprintf(df.output, "[Poll #%d] Checking authorization status...\n", pollCount)
 
 			// Create a fresh request for each poll because Do consumes req.Body.
 			req, err := http.NewRequest("POST", tokenURL, strings.NewReader(bodyData))
@@ -179,7 +170,7 @@ func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, err
 			// device flow; the next poll can establish a new connection.
 			resp, err := df.client.Do(req)
 			if err != nil {
-				fmt.Printf("[Poll #%d] Request failed: %v\n", pollCount, err)
+				fmt.Fprintf(df.output, "[Poll #%d] Request failed: %v\n", pollCount, err)
 				continue
 			}
 
@@ -187,12 +178,11 @@ func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, err
 			data, err := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if err != nil {
-				fmt.Printf("[Poll #%d] Failed to read response: %v\n", pollCount, err)
+				fmt.Fprintf(df.output, "[Poll #%d] Failed to read response: %v\n", pollCount, err)
 				return nil, fmt.Errorf("failed to read response: %w", err)
 			}
 
-			fmt.Printf("[Poll #%d] Response status: %d\n", pollCount, resp.StatusCode)
-			fmt.Printf("[Poll #%d] Response body: %s\n", pollCount, string(data))
+			fmt.Fprintf(df.output, "[Poll #%d] Response status: %d\n", pollCount, resp.StatusCode)
 
 			// First, try to parse as an error response (GitHub returns errors with 200 status)
 			var errorResp struct {
@@ -201,12 +191,12 @@ func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, err
 				Interval         int    `json:"interval"`
 			}
 			if err := json.Unmarshal(data, &errorResp); err == nil && errorResp.Error != "" {
-				fmt.Printf("[Poll #%d] Error response: %s - %s\n", pollCount, errorResp.Error, errorResp.ErrorDescription)
+				fmt.Fprintf(df.output, "[Poll #%d] OAuth response: %s\n", pollCount, errorResp.Error)
 				switch errorResp.Error {
 				case "authorization_pending":
 					// Show progress dot every 5 seconds
 					if time.Since(lastDot) >= 5*time.Second {
-						fmt.Print(".")
+						fmt.Fprint(df.output, ".")
 						lastDot = time.Now()
 					}
 					continue
@@ -215,7 +205,7 @@ func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, err
 					newInterval := errorResp.Interval
 					if newInterval > 0 {
 						ticker.Reset(time.Duration(newInterval) * time.Second)
-						fmt.Printf("\nGitHub requested to slow down. Waiting %d seconds between checks...\n", newInterval)
+						fmt.Fprintf(df.output, "\nGitHub requested to slow down. Waiting %d seconds between checks...\n", newInterval)
 					}
 					continue
 				case "expired_token":
@@ -223,30 +213,30 @@ func (df *DeviceFlow) pollForToken(deviceCode string, interval int) (*Token, err
 				case "access_denied":
 					return nil, fmt.Errorf("user denied access")
 				default:
-					return nil, fmt.Errorf("GitHub error: %s - %s", errorResp.Error, errorResp.ErrorDescription)
+					return nil, fmt.Errorf("GitHub OAuth error: %s", errorResp.Error)
 				}
 			}
 
 			// Check for non-200 status codes
 			if resp.StatusCode != http.StatusOK {
-				return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(data))
+				return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 			}
 
 			// Parse as successful token response
 			var token Token
 			if err := json.Unmarshal(data, &token); err != nil {
-				fmt.Printf("[Poll #%d] Failed to parse token response: %v\n", pollCount, err)
+				fmt.Fprintf(df.output, "[Poll #%d] Failed to parse OAuth response: %v\n", pollCount, err)
 				return nil, fmt.Errorf("failed to parse response: %w", err)
 			}
 
 			// Verify we got a valid token
 			if token.AccessToken == "" {
-				fmt.Printf("[Poll #%d] Token response missing access_token, continuing...\n", pollCount)
+				fmt.Fprintf(df.output, "[Poll #%d] OAuth response did not contain an access token; continuing...\n", pollCount)
 				continue
 			}
 
-			fmt.Printf("[Poll #%d] Authorization successful! Got access token.\n", pollCount)
-			fmt.Println("\nAuthorization successful!")
+			fmt.Fprintf(df.output, "[Poll #%d] Authorization successful.\n", pollCount)
+			fmt.Fprintln(df.output, "\nAuthorization successful!")
 			return &token, nil
 		}
 	}
