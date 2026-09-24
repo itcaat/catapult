@@ -103,6 +103,16 @@ be explicit.
 - When finishing work, the final progress update must include the commit title. If no
   commit was created, explicitly state that and provide the recommended commit title.
 
+## Test environment
+
+In sandboxed environments the default Go build cache may be read-only. If `go test`
+fails with a cache permission or read-only filesystem error, rerun it with a writable,
+task-specific cache:
+
+```bash
+GOCACHE=/tmp/catapult-go-cache go test ./...
+```
+
 ## Current audit priority order
 
 Create and take Issues in this order:
