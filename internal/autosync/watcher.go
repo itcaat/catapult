@@ -3,6 +3,7 @@ package autosync
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -68,9 +69,23 @@ func NewWatcher(config *WatchConfig, logger *logging.Logger) (*Watcher, error) {
 
 // Watch starts watching the specified directory for changes
 func (w *Watcher) Watch(ctx context.Context, directory string, callback func(FileEvent)) error {
-	// Add directory to watcher
-	if err := w.fsWatcher.Add(directory); err != nil {
-		return fmt.Errorf("failed to add directory to watcher: %w", err)
+	// fsnotify is not recursive: register the root and all directories below it.
+	if err := filepath.WalkDir(directory, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if w.shouldIgnore(path) {
+			return filepath.SkipDir
+		}
+		if err := w.fsWatcher.Add(path); err != nil {
+			return fmt.Errorf("failed to watch directory %s: %w", path, err)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to add directory tree to watcher: %w", err)
 	}
 
 	w.logger.Infof("Started watching directory: %s", directory)
@@ -78,6 +93,24 @@ func (w *Watcher) Watch(ctx context.Context, directory string, callback func(Fil
 	for {
 		select {
 		case event := <-w.fsWatcher.Events:
+			if event.Op&fsnotify.Create != 0 {
+				if info, err := os.Stat(event.Name); err == nil && info.IsDir() && !w.shouldIgnore(event.Name) {
+					if err := filepath.WalkDir(event.Name, func(path string, entry os.DirEntry, walkErr error) error {
+						if walkErr != nil {
+							return walkErr
+						}
+						if !entry.IsDir() {
+							return nil
+						}
+						if w.shouldIgnore(path) {
+							return filepath.SkipDir
+						}
+						return w.fsWatcher.Add(path)
+					}); err != nil {
+						w.logger.Errorf("Failed to watch new directory %s: %v", event.Name, err)
+					}
+				}
+			}
 			if w.shouldIgnore(event.Name) {
 				continue
 			}

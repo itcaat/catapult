@@ -152,6 +152,10 @@ func (fm *FileManager) GetTrackedFiles() []*FileInfo {
 func (fm *FileManager) GetFileInfo(path string) (*FileInfo, error) {
 	fm.mutex.RLock()
 	defer fm.mutex.RUnlock()
+	return fm.getFileInfoLocked(path)
+}
+
+func (fm *FileManager) getFileInfoLocked(path string) (*FileInfo, error) {
 	// Get absolute path
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -206,9 +210,13 @@ func (fm *FileManager) UpdateFileInfo(path string) error {
 
 func (fm *FileManager) updateFileInfoLocked(path string) error {
 	// Get file info
-	fileInfo, err := fm.GetFileInfo(path)
+	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get absolute path: %w", err)
+	}
+	fileInfo, exists := fm.files[absPath]
+	if !exists {
+		return fmt.Errorf("file not tracked: %s", path)
 	}
 
 	// Get current file info
@@ -331,7 +339,7 @@ func (fm *FileManager) GetSyncStatus(path string) (SyncStatus, error) {
 
 func (fm *FileManager) getSyncStatusLocked(path string) (SyncStatus, error) {
 	// Get file info
-	fileInfo, err := fm.GetFileInfo(path)
+	fileInfo, err := fm.getFileInfoLocked(path)
 	if err != nil {
 		return SyncStatusSynced, err
 	}

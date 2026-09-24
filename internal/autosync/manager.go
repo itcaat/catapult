@@ -56,15 +56,19 @@ type Manager struct {
 	queue           *Queue
 	jobs            chan syncJob
 	queuedJobs      map[string]struct{}
+	runningJobs     map[string]struct{}
+	pendingJobs     map[string]struct{}
 	jobsMutex       sync.Mutex
 	workerDone      chan struct{}
 	workerStarted   chan struct{}
+	changeDebouncer *Debouncer
 	shutdownOnce    sync.Once
 }
 
 type syncJob struct {
 	path         string
 	processQueue bool
+	checkRemote  bool
 }
 
 // NewManager creates a new auto-sync manager
@@ -111,8 +115,11 @@ func NewManager(
 		queue:           queue,
 		jobs:            make(chan syncJob, 64),
 		queuedJobs:      make(map[string]struct{}),
+		runningJobs:     make(map[string]struct{}),
+		pendingJobs:     make(map[string]struct{}),
 		workerDone:      make(chan struct{}),
 		workerStarted:   make(chan struct{}),
+		changeDebouncer: NewDebouncer(autoSyncConfig.DebounceDelay),
 	}, nil
 }
 
@@ -161,6 +168,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	case <-ctx.Done():
 	case <-m.done:
 	}
+	cancel()
 	m.shutdown()
 	<-m.workerDone
 	return ctx.Err()
@@ -175,14 +183,33 @@ func (m *Manager) syncWorker(ctx context.Context) {
 		case <-m.done:
 			return
 		case job := <-m.jobs:
-			if job.processQueue {
-				m.processPendingOperations()
-			} else {
-				m.syncFile(job.path)
-			}
+			key := jobKey(job)
 			m.jobsMutex.Lock()
-			delete(m.queuedJobs, jobKey(job))
+			m.runningJobs[key] = struct{}{}
 			m.jobsMutex.Unlock()
+
+			// A job may be marked pending while it is running. Repeat it once
+			// after completion so an event arriving during a sync is not lost.
+			for {
+				if job.processQueue {
+					m.processPendingOperations()
+				} else if job.checkRemote {
+					m.checkRemoteChanges()
+				} else {
+					m.syncFile(job.path)
+				}
+
+				m.jobsMutex.Lock()
+				if _, pending := m.pendingJobs[key]; pending {
+					delete(m.pendingJobs, key)
+					m.jobsMutex.Unlock()
+					continue
+				}
+				delete(m.runningJobs, key)
+				delete(m.queuedJobs, key)
+				m.jobsMutex.Unlock()
+				break
+			}
 		}
 	}
 }
@@ -190,6 +217,9 @@ func (m *Manager) syncWorker(ctx context.Context) {
 func jobKey(job syncJob) string {
 	if job.processQueue {
 		return "queue"
+	}
+	if job.checkRemote {
+		return "remote"
 	}
 	return "sync:" + job.path
 }
@@ -202,10 +232,17 @@ func (m *Manager) enqueueQueueProcessing() {
 	m.enqueue(syncJob{processQueue: true})
 }
 
+func (m *Manager) enqueueRemoteCheck() {
+	m.enqueue(syncJob{checkRemote: true})
+}
+
 func (m *Manager) enqueue(job syncJob) {
 	key := jobKey(job)
 	m.jobsMutex.Lock()
 	if _, exists := m.queuedJobs[key]; exists {
+		if _, running := m.runningJobs[key]; running {
+			m.pendingJobs[key] = struct{}{}
+		}
 		m.jobsMutex.Unlock()
 		return
 	}
@@ -231,24 +268,18 @@ func (m *Manager) onFileChange(event FileEvent) {
 	m.logger.Debugf("Processing file change: %s", event.Path)
 
 	// Check if file should be synced
-	relPath, err := filepath.Rel(m.appConfig.Storage.BaseDir, event.Path)
+	_, err := filepath.Rel(m.appConfig.Storage.BaseDir, event.Path)
 	if err != nil {
 		m.logger.Errorf("Failed to get relative path for %s: %v", event.Path, err)
 		return
 	}
 
-	// Skip if file doesn't exist (might be a temporary file)
-	if _, err := os.Stat(event.Path); os.IsNotExist(err) {
-		m.logger.Infof("File no longer exists, skipping: %s", event.Path)
-		return
-	}
-
-	// Try to sync immediately if online, otherwise queue
-	if m.networkDetector.IsConnected() {
-		m.enqueueSync(relPath)
-	} else {
-		m.queueOperation(relPath, "sync")
-	}
+	// Batch all changes during the debounce window into one full sync. SyncAll
+	// already scans the directory, so syncing individual paths would repeat the
+	// same expensive operation for every file in a bulk change.
+	m.changeDebouncer.Add("all-files", func() {
+		m.enqueueSync("")
+	})
 }
 
 // syncFile synchronizes a specific file
@@ -421,7 +452,7 @@ func (m *Manager) startPeriodicRemoteCheck(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			if m.networkDetector.IsConnected() {
-				m.checkRemoteChanges()
+				m.enqueueRemoteCheck()
 			}
 		case <-ctx.Done():
 			return
@@ -503,6 +534,7 @@ func (m *Manager) Stop() error {
 func (m *Manager) shutdown() {
 	m.shutdownOnce.Do(func() {
 		close(m.done)
+		m.changeDebouncer.Stop()
 		if err := m.watcher.Close(); err != nil {
 			m.logger.Errorf("Failed to stop file watcher: %v", err)
 		}
