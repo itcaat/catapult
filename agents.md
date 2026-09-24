@@ -88,6 +88,11 @@ be explicit.
 
 - One Issue represents one logically complete task. Split larger work into a parent Issue
   and related Issues.
+- Follow KISS: prefer the simplest solution that solves the confirmed problem and fits the
+  existing architecture. Avoid overengineering, speculative abstractions, premature
+  optimization, and scope expansion. Add complexity only when a concrete requirement,
+  measured bottleneck, or reliability constraint justifies it; explain that trade-off
+  before proceeding.
 - Do not mix a critical fix with unrelated refactoring.
 - When changing user data, provide recovery, atomic writes, and interruption handling
   where applicable.

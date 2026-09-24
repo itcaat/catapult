@@ -139,6 +139,37 @@ func TestGetAllFilesWithContentFailsSafelyWhenTreeIsTruncated(t *testing.T) {
 	}
 }
 
+func TestGetFileFallsBackToRawBlobForUnsupportedContentsEncoding(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/repos/owner/repo":
+			return jsonResponse(`{"default_branch":"main"}`), nil
+		case "/repos/owner/repo/contents/archive.bin":
+			return jsonResponse(`{"type":"file","sha":"blob-sha","size":4,"encoding":"none"}`), nil
+		case "/repos/owner/repo/git/blobs/blob-sha":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/octet-stream"}},
+				Body:       io.NopCloser(strings.NewReader("\x00\x01\x02\x03")),
+			}, nil
+		default:
+			return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("not found"))}, nil
+		}
+	})
+	client := github.NewClient(&http.Client{Transport: transport})
+	baseURL, _ := url.Parse("https://api.github.test/")
+	client.BaseURL = baseURL
+	repo := &GitHubRepository{client: client, owner: "owner", name: "repo"}
+
+	content, err := repo.GetFile(context.Background(), "archive.bin")
+	if err != nil {
+		t.Fatalf("GetFile() error = %v", err)
+	}
+	if content != "\x00\x01\x02\x03" {
+		t.Fatalf("GetFile() content = %q, want raw blob bytes", content)
+	}
+}
+
 func TestGetFileRetriesRateLimitAndPreservesEmptyContent(t *testing.T) {
 	var attempts int
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {

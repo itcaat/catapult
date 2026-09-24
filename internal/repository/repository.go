@@ -108,6 +108,13 @@ type Repository interface {
 	GetAllFilesWithContent(ctx context.Context) (map[string]*RemoteFileInfo, error)
 }
 
+// BatchDeleter is an optional optimization for repositories that can remove
+// multiple files in one commit. Repository implementations that do not support
+// it continue to use DeleteFile one file at a time.
+type BatchDeleter interface {
+	DeleteFiles(ctx context.Context, paths []string) error
+}
+
 // GitHubRepository implements the Repository interface using GitHub API
 type GitHubRepository struct {
 	client *github.Client
@@ -306,7 +313,21 @@ func (r *GitHubRepository) GetFile(ctx context.Context, path string) (string, er
 		if file.GetSize() > githubFileSizeLimit {
 			return "", &FileSizeError{FilePath: path, FileSize: file.GetSize(), Limit: githubFileSizeLimit}
 		}
-		return "", &GitHubValidationError{FilePath: path, Message: "unable to decode file content (binary or unsupported response)", Details: err.Error()}
+
+		// The Contents API may return encoding="none" for large or binary
+		// files. Fetch the blob through the Git API in that case; it returns
+		// the raw bytes and is also needed when preserving a changed remote
+		// version during a local deletion conflict.
+		var raw []byte
+		rawErr := r.withRateLimitRetry(ctx, func() error {
+			var callErr error
+			raw, _, callErr = r.client.Git.GetBlobRaw(ctx, r.owner, r.name, file.GetSHA())
+			return callErr
+		})
+		if rawErr == nil {
+			return string(raw), nil
+		}
+		return "", &GitHubValidationError{FilePath: path, Message: "unable to decode file content (binary or unsupported response)", Details: fmt.Sprintf("contents API: %v; git blob API: %v", err, rawErr)}
 	}
 	return content, nil
 }
@@ -358,6 +379,82 @@ func (r *GitHubRepository) DeleteFile(ctx context.Context, path string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to delete file: %w", err)
+	}
+	return nil
+}
+
+// DeleteFiles removes multiple files in a single Git commit. The Contents API
+// creates one commit per file; using the Git data API reduces a bulk delete to
+// four Git API requests and one commit, regardless of the number of files.
+func (r *GitHubRepository) DeleteFiles(ctx context.Context, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	branch, err := r.branch(ctx)
+	if err != nil {
+		return err
+	}
+	refName := "heads/" + branch
+
+	var ref *github.Reference
+	err = r.withRateLimitRetry(ctx, func() error {
+		var callErr error
+		ref, _, callErr = r.client.Git.GetRef(ctx, r.owner, r.name, refName)
+		return callErr
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get branch reference: %w", err)
+	}
+	if ref == nil || ref.Object == nil || ref.Object.SHA == nil {
+		return fmt.Errorf("GitHub returned an invalid branch reference")
+	}
+
+	entries := make([]*github.TreeEntry, 0, len(paths))
+	for _, path := range paths {
+		path = normalizeRemotePath(path)
+		entries = append(entries, &github.TreeEntry{Path: github.String(path), Type: github.String("blob")})
+	}
+
+	var tree *github.Tree
+	err = r.withRateLimitRetry(ctx, func() error {
+		var callErr error
+		tree, _, callErr = r.client.Git.CreateTree(ctx, r.owner, r.name, ref.Object.GetSHA(), entries)
+		return callErr
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create deletion tree: %w", err)
+	}
+	if tree == nil || tree.SHA == nil {
+		return fmt.Errorf("GitHub returned an invalid deletion tree")
+	}
+
+	var commit *github.Commit
+	err = r.withRateLimitRetry(ctx, func() error {
+		var callErr error
+		commit, _, callErr = r.client.Git.CreateCommit(ctx, r.owner, r.name, &github.Commit{
+			Message: github.String(fmt.Sprintf("Delete %d files", len(paths))),
+			Tree:    tree,
+			Parents: []*github.Commit{{SHA: ref.Object.SHA}},
+		}, nil)
+		return callErr
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create deletion commit: %w", err)
+	}
+	if commit == nil || commit.SHA == nil {
+		return fmt.Errorf("GitHub returned an invalid deletion commit")
+	}
+
+	err = r.withRateLimitRetry(ctx, func() error {
+		_, _, callErr := r.client.Git.UpdateRef(ctx, r.owner, r.name, &github.Reference{
+			Ref:    github.String("refs/" + refName),
+			Object: &github.GitObject{SHA: commit.SHA},
+		}, false)
+		return callErr
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update branch reference: %w", err)
 	}
 	return nil
 }

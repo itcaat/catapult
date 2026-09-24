@@ -135,6 +135,37 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 
 	fmt.Fprintf(out, "Syncing %d files...\n", len(allFiles))
 
+	// GitHub's Contents API deletes one file per commit. When several files
+	// were removed locally, use the optional Git data API implementation to
+	// delete them in one commit. Keep the regular per-file path for single
+	// deletes, conflicts, and repository implementations without this feature.
+	batchDeleted := make(map[string]struct{})
+	batchDeleteErrors := make(map[string]error)
+	if batchDeleter, ok := s.repo.(repository.BatchDeleter); ok {
+		batchPaths := make([]string, 0)
+		for relPath, file := range allFiles {
+			remoteFile := remoteFiles[relPath]
+			if remoteFile == nil || file.LastSyncedRemoteSHA == "" || remoteFile.SHA != file.LastSyncedRemoteSHA {
+				continue
+			}
+			_, statErr := os.Stat(file.Path)
+			if os.IsNotExist(statErr) || file.Deleted {
+				batchPaths = append(batchPaths, relPath)
+			}
+		}
+		if len(batchPaths) > 1 {
+			if err := batchDeleter.DeleteFiles(ctx, batchPaths); err != nil {
+				for _, relPath := range batchPaths {
+					batchDeleteErrors[relPath] = fmt.Errorf("failed to delete remote file: %w", err)
+				}
+			} else {
+				for _, relPath := range batchPaths {
+					batchDeleted[relPath] = struct{}{}
+				}
+			}
+		}
+	}
+
 	// Track results
 	var synced, updated, pulled, conflicted, deleted int
 
@@ -142,7 +173,15 @@ func (s *Syncer) SyncAll(ctx context.Context, out io.Writer) error {
 	for relPath, file := range allFiles {
 		fileStartedAt := time.Now()
 		fmt.Fprintf(out, "[diagnostic] Processing %s...\n", relPath)
-		result := s.syncFileByPath(ctx, file, relPath, remoteFiles[relPath])
+		var result SyncResult
+		if _, ok := batchDeleted[relPath]; ok {
+			s.fileManager.RemoveFile(file.Path)
+			result = SyncResult{Path: file.Path, Status: SyncStatusDeleted}
+		} else if err, ok := batchDeleteErrors[relPath]; ok {
+			result = SyncResult{Path: file.Path, Error: err}
+		} else {
+			result = s.syncFileByPath(ctx, file, relPath, remoteFiles[relPath])
+		}
 		fmt.Fprintf(out, "[diagnostic] Finished %s in %s\n", relPath, time.Since(fileStartedAt).Round(time.Millisecond))
 
 		// Show what's happening with each file
